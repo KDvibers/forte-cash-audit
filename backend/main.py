@@ -29,6 +29,8 @@ class ApiGuards:
     def __init__(self, app, settings: Settings):
         self.app = app
         self.settings = settings
+        self.public_authority = (settings.public_origin.removeprefix('https://')
+                                 if settings.public_origin else None)
 
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http':
@@ -45,9 +47,18 @@ class ApiGuards:
 
         async def reject(status, detail):
             response = JSONResponse({'detail': detail}, status_code=status,
-                                    headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
+                                    headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+                                             'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer'})
             await response(scope, receive, send)
 
+        if self.public_authority:
+            hosts = headers.getlist('host')
+            if len(hosts) != 1 or hosts[0].lower() != self.public_authority:
+                return await reject(400, 'Адрес сервера не совпадает с настроенным публичным адресом.')
+            # The launcher trusts proxy headers only from the local tunnel process.
+            # Reading X-Forwarded-Proto here would also trust arbitrary clients.
+            if scope.get('scheme') != 'https':
+                return await reject(400, 'Для публичного доступа требуется HTTPS.')
         if protected:
             if service is None:
                 return await reject(503, 'Сервер запускается.')
@@ -57,6 +68,10 @@ class ApiGuards:
         if browser:
             if headers.get('sec-fetch-site', '').lower() == 'cross-site':
                 return await reject(403, 'Откройте интерфейс на адресе этого сервера.')
+            if self.settings.public_origin and 'origin' in headers:
+                origins = headers.getlist('origin')
+                if origins != [self.settings.public_origin]:
+                    return await reject(403, 'Откройте интерфейс на настроенном публичном адресе.')
             sessions = getattr(scope['app'].state, 'browser_sessions', None)
             if service is None or sessions is None:
                 return await reject(503, 'Сервер запускается.')
@@ -67,8 +82,8 @@ class ApiGuards:
                     return await reject(401, 'Сессия истекла. Обновите подключение к серверу.')
                 scope.setdefault('state', {})['browser_session'] = session
                 if scope['method'] == 'POST':
-                    origin = f'{request.url.scheme}://{request.url.netloc}'
-                    if headers.get('origin') != origin:
+                    origin = self.settings.public_origin or f'{request.url.scheme}://{request.url.netloc}'
+                    if headers.getlist('origin') != [origin]:
                         return await reject(403, 'Загрузка разрешена только из интерфейса этого сервера.')
                     supplied = headers.get('x-csrf-token', '')
                     if not hmac.compare_digest(supplied.encode(), session['csrf_token'].encode()):
@@ -106,6 +121,8 @@ class ApiGuards:
                     await send({'type': 'http.response.start', 'status': 413, 'headers': [
                         (b'content-type', b'application/json; charset=utf-8'),
                         (b'content-length', str(len(body)).encode()), (b'cache-control', b'no-store'),
+                        (b'x-content-type-options', b'nosniff'),
+                        (b'x-frame-options', b'DENY'), (b'referrer-policy', b'no-referrer'),
                     ]})
                     await send({'type': 'http.response.body', 'body': body})
                 return
@@ -113,6 +130,7 @@ class ApiGuards:
                 response_started = True
                 message['headers'] = list(message.get('headers', [])) + [
                     (b'cache-control', b'no-store'), (b'x-content-type-options', b'nosniff'),
+                    (b'x-frame-options', b'DENY'), (b'referrer-policy', b'no-referrer'),
                     (b'x-cash-audit-mode', self.settings.mode.encode()),
                 ]
             await send(message)
@@ -185,7 +203,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             'job_timeout_seconds': settings.job_timeout_seconds,
         })
         response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_SECONDS, path='/ui',
-                            httponly=True, secure=request.url.scheme == 'https', samesite='strict')
+                            httponly=True, secure=bool(settings.public_origin) or request.url.scheme == 'https',
+                            samesite='strict')
         return response
 
     async def accept_upload(request: Request, file: UploadFile, x_upload_id: str | None, owner: str):
