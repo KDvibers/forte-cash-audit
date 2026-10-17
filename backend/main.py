@@ -161,7 +161,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.get('/assets/{name}')
     async def frontend_asset(name: str):
-        media_types = {'styles.css': 'text/css', 'app.js': 'text/javascript'}
+        media_types = {'styles.css': 'text/css', 'app.js': 'text/javascript',
+                       'results.css': 'text/css', 'results.js': 'text/javascript'}
         if name not in media_types:
             raise HTTPException(404, 'Файл не найден.')
         return FileResponse(frontend / name, media_type=media_types[name])
