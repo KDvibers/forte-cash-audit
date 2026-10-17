@@ -1,4 +1,4 @@
-"""Stage 2: authenticated asynchronous video API; no frontend routes yet."""
+"""Asynchronous video API and a same-origin, anonymous browser interface."""
 from __future__ import annotations
 
 import asyncio
@@ -12,10 +12,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.datastructures import Headers
 
 from .config import Settings
+from .browser_sessions import BrowserSessions, COOKIE_NAME, SESSION_TTL_SECONDS
 from .service import JobService
 from .validation import InvalidVideo, validate_video
 
@@ -35,6 +36,7 @@ class ApiGuards:
         headers = Headers(scope=scope)
         service = getattr(scope['app'].state, 'service', None)
         protected = scope['path'].startswith('/api/v1/')
+        browser = scope['path'] == '/ui' or scope['path'].startswith('/ui/')
         response_started = False
         received = 0
         exceeded = False
@@ -52,6 +54,25 @@ class ApiGuards:
             supplied = headers.get('x-api-key', '')
             if not hmac.compare_digest(supplied.encode(), service.api_key.encode()):
                 return await reject(401, 'Неверный или отсутствующий X-API-Key.')
+        if browser:
+            if headers.get('sec-fetch-site', '').lower() == 'cross-site':
+                return await reject(403, 'Откройте интерфейс на адресе этого сервера.')
+            sessions = getattr(scope['app'].state, 'browser_sessions', None)
+            if service is None or sessions is None:
+                return await reject(503, 'Сервер запускается.')
+            request = Request(scope)
+            if not (scope['path'] == '/ui/session' and scope['method'] == 'GET'):
+                session = sessions.get(request.cookies.get(COOKIE_NAME))
+                if session is None:
+                    return await reject(401, 'Сессия истекла. Обновите подключение к серверу.')
+                scope.setdefault('state', {})['browser_session'] = session
+                if scope['method'] == 'POST':
+                    origin = f'{request.url.scheme}://{request.url.netloc}'
+                    if headers.get('origin') != origin:
+                        return await reject(403, 'Загрузка разрешена только из интерфейса этого сервера.')
+                    supplied = headers.get('x-csrf-token', '')
+                    if not hmac.compare_digest(supplied.encode(), session['csrf_token'].encode()):
+                        return await reject(403, 'Проверка сессии не пройдена. Обновите подключение к серверу.')
         if scope['method'] == 'POST':
             value = headers.get('content-length')
             if value is not None:
@@ -63,7 +84,7 @@ class ApiGuards:
                     return await reject(400, 'Некорректный Content-Length.')
                 if length > limit:
                     return await reject(413, 'Файл превышает допустимый размер.')
-            if scope['path'] == '/api/v1/analyze' and not service.ready:
+            if scope['path'] in {'/api/v1/analyze', '/ui/analyze'} and not service.ready:
                 return await reject(503, service.readiness_message)
 
         async def bounded_receive():
@@ -119,11 +140,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.service = service
         await asyncio.to_thread(service.start)
         try:
+            application.state.browser_sessions = BrowserSessions(service.store)
             yield
         finally:
             await asyncio.to_thread(service.stop)
 
-    application = FastAPI(title='Forte Cash Audit API', version='0.2.0', lifespan=lifespan,
+    application = FastAPI(title='Forte Cash Audit API', version='0.4.0', lifespan=lifespan,
                           docs_url=None, redoc_url=None, openapi_url=None)
     application.state.settings = settings
     application.add_middleware(ApiGuards, settings=settings)
@@ -131,10 +153,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def service() -> JobService:
         return application.state.service
 
+    frontend = Path(__file__).resolve().parent.parent / 'frontend'
+
     @application.get('/')
     async def index():
-        return {'service': 'Forte Cash Audit API', 'stage': 2, 'mode': settings.mode,
-                'health': '/health', 'message': 'Сервер API. Веб-интерфейс появится на следующем этапе.'}
+        return FileResponse(frontend / 'index.html', media_type='text/html')
+
+    @application.get('/assets/{name}')
+    async def frontend_asset(name: str):
+        media_types = {'styles.css': 'text/css', 'app.js': 'text/javascript'}
+        if name not in media_types:
+            raise HTTPException(404, 'Файл не найден.')
+        return FileResponse(frontend / name, media_type=media_types[name])
 
     @application.get('/health')
     async def health():
@@ -142,9 +172,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {'status': 'ok' if worker.ready else 'degraded', 'mode': settings.mode,
                 'analyzer_ready': worker.ready, 'message': worker.readiness_message}
 
-    @application.post('/api/v1/analyze')
-    async def analyze(request: Request, file: UploadFile = File(...),
-                      x_upload_id: str | None = Header(None)):
+    @application.get('/ui/session')
+    async def browser_session(request: Request):
+        worker = service()
+        token, session = application.state.browser_sessions.open(request.cookies.get(COOKIE_NAME))
+        response = JSONResponse({
+            'csrf_token': session['csrf_token'], 'mode': settings.mode,
+            'analyzer_ready': worker.ready, 'message': worker.readiness_message,
+            'max_upload_bytes': settings.max_upload_bytes, 'poll_interval_ms': 2000,
+            'job_timeout_seconds': settings.job_timeout_seconds,
+        })
+        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_SECONDS, path='/ui',
+                            httponly=True, secure=request.url.scheme == 'https', samesite='strict')
+        return response
+
+    async def accept_upload(request: Request, file: UploadFile, x_upload_id: str | None, owner: str):
         worker = service()
         job_id = None
         directory = None
@@ -156,14 +198,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     upload_id = str(uuid.UUID(x_upload_id))
                 except (ValueError, AttributeError):
                     raise HTTPException(422, 'X-Upload-ID должен быть UUID.')
-                previous = worker.store.by_upload_id('api', upload_id)
+                previous = worker.store.by_upload_id(owner, upload_id)
                 if previous:
                     return {'job_id': previous['job_id']}
             name = display_filename(file.filename)
             if Path(name).suffix.lower() != '.mov':
                 raise HTTPException(415, 'Выберите видео в формате .mov.')
             ip = request.client.host if request.client else 'unknown'
-            job_id = worker.reserve('api', upload_id, 'ip:' + ip)
+            job_id = worker.reserve(owner, upload_id, 'ip:' + ip)
             processing_started = time.time()
             directory = worker.upload_dir / job_id
             directory.mkdir()
@@ -183,7 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(422, str(exc)) from exc
             if not worker.ready:
                 raise HTTPException(503, 'Исполнитель недоступен. Повторите после восстановления сервера.')
-            worker.store.create({'job_id': job_id, 'owner': 'api', 'file_name': name,
+            worker.store.create({'job_id': job_id, 'owner': owner, 'file_name': name,
                                  'file_size': size, 'video_path': str(path.resolve()),
                                  'created_at': processing_started, 'scenario': settings.mock_scenario,
                                  'upload_id': upload_id})
@@ -197,18 +239,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await file.close()
             if job_id:
-                worker.release(job_id, 'api', upload_id)
+                worker.release(job_id, owner, upload_id)
             if not created and directory and directory.is_dir():
                 resolved = directory.resolve()
                 if resolved.parent == worker.upload_dir.resolve() and resolved.name == job_id:
                     shutil.rmtree(resolved)
 
-    @application.get('/api/v1/jobs/{job_id}')
-    async def status(job_id: str):
+    @application.post('/api/v1/analyze')
+    async def analyze(request: Request, file: UploadFile = File(...),
+                      x_upload_id: str | None = Header(None)):
+        return await accept_upload(request, file, x_upload_id, 'api')
+
+    @application.post('/ui/analyze')
+    async def browser_analyze(request: Request, file: UploadFile = File(...),
+                              x_upload_id: str | None = Header(None)):
+        return await accept_upload(request, file, x_upload_id,
+                                   BrowserSessions.owner(request.state.browser_session))
+
+    def owned_result(job_id: str, owner: str):
         job = service().store.get(job_id)
-        if not job or job['owner'] != 'api':
+        if not job or job['owner'] != owner:
             raise HTTPException(404, 'Задание не найдено или срок хранения истёк.')
         return service().public_result(job)
+
+    @application.get('/api/v1/jobs/{job_id}')
+    async def status(job_id: str):
+        return owned_result(job_id, 'api')
+
+    @application.get('/ui/jobs/{job_id}')
+    async def browser_status(job_id: str, request: Request):
+        return owned_result(job_id, BrowserSessions.owner(request.state.browser_session))
 
     return application
 
