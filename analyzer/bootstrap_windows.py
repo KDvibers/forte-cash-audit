@@ -16,6 +16,13 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_SOURCE = "huggingface"
+MODEL_LOCK_PATH = ROOT / "analyzer/runtime-lock.json"
+DOWNLOAD_WORKERS = 4
+
+
+def modelscope_url(asset):
+    repository = asset["url"].split("/resolve/", 1)[0].removeprefix("https://huggingface.co/")
+    return f"https://www.modelscope.cn/api/v1/models/{repository}/repo?Revision=master&FilePath={asset['name']}"
 
 
 def download_model_ranges(asset, target):
@@ -29,9 +36,7 @@ def download_model_ranges(asset, target):
     pieces.mkdir(exist_ok=True)
     block = 16 * 1024 * 1024
     ranges = [(start, min(start + block, total) - 1) for start in range(prefix, total, block)]
-    url = asset["url"] if MODEL_SOURCE == "huggingface-range" else (
-        "https://www.modelscope.cn/api/v1/models/Qwen/Qwen3-VL-2B-Instruct-GGUF/repo?Revision=master&FilePath=" + asset["name"]
-    )
+    url = asset["url"] if MODEL_SOURCE == "huggingface-range" else modelscope_url(asset)
 
     def fetch(span):
         start, end = span
@@ -76,7 +81,7 @@ def download_model_ranges(asset, target):
                     raise
                 time.sleep(attempt + 1)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
         completed = list(pool.map(fetch, ranges))
     with partial.open("ab") as output:
         for piece in completed:
@@ -111,7 +116,7 @@ def download(asset):
         os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
         from huggingface_hub import hf_hub_download
 
-        lock = json.loads((ROOT / "analyzer/runtime-lock.json").read_text(encoding="utf-8"))
+        lock = json.loads(MODEL_LOCK_PATH.read_text(encoding="utf-8"))
         print(f"Downloading with Hugging Face: {asset['name']}", flush=True)
         downloaded = Path(hf_hub_download(
             repo_id=lock["model_repository"], filename=asset["name"],
@@ -129,7 +134,7 @@ def download(asset):
             headers["Range"] = f"bytes={offset}-"
         url = asset["url"]
         if is_model and MODEL_SOURCE == "modelscope":
-            url = "https://www.modelscope.cn/api/v1/models/Qwen/Qwen3-VL-2B-Instruct-GGUF/repo?Revision=master&FilePath=" + asset["name"]
+            url = modelscope_url(asset)
         request = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
@@ -158,11 +163,22 @@ def download(asset):
 
 
 def main():
-    global MODEL_SOURCE
+    global MODEL_SOURCE, MODEL_LOCK_PATH, DOWNLOAD_WORKERS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-source", choices=["huggingface", "huggingface-range", "modelscope"], default="huggingface-range")
-    MODEL_SOURCE = parser.parse_args().model_source
-    lock = json.loads((ROOT / "analyzer/runtime-lock.json").read_text(encoding="utf-8"))
+    parser.add_argument("--model-size", choices=["2b", "4b", "8b"], default="2b")
+    parser.add_argument("--download-workers", type=int, choices=range(1, 17), default=4,
+                        help="Concurrent byte-range requests per model file")
+    args = parser.parse_args()
+    MODEL_SOURCE = args.model_source
+    DOWNLOAD_WORKERS = args.download_workers
+    MODEL_LOCK_PATH = ROOT / "analyzer" / (f"runtime-lock-{args.model_size}.json" if args.model_size != "2b" else "runtime-lock.json")
+    lock = json.loads(MODEL_LOCK_PATH.read_text(encoding="utf-8"))
+    if "runtime_assets_from" in lock:
+        runtime_lock = json.loads((MODEL_LOCK_PATH.parent / lock["runtime_assets_from"]).read_text(encoding="utf-8"))
+        if runtime_lock["llama_release"] != lock["llama_release"]:
+            raise ValueError("Model and runtime locks specify different runtime releases")
+        lock["assets"].extend(asset for asset in runtime_lock["assets"] if "extract_to" in asset)
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(download, lock["assets"]))
     # Unpack sequentially because the two archives share a destination.
@@ -175,7 +191,16 @@ def main():
             for item in archive.infolist():
                 if not (destination / item.filename).resolve().is_relative_to(destination):
                     raise ValueError("Archive member escapes runtime directory")
-            archive.extractall(destination)
+            for item in archive.infolist():
+                installed = destination / item.filename
+                if not item.is_dir() and installed.is_file() and installed.stat().st_size == item.file_size:
+                    with archive.open(item) as source:
+                        identical = digest(installed) == hashlib.file_digest(source, "sha256").hexdigest()
+                    if identical:
+                        # A running Windows server locks its executable. Adding
+                        # another model must not rewrite an unchanged runtime.
+                        continue
+                archive.extract(item, destination)
         print(f"Unpacked: {asset['name']}", flush=True)
     print("Local assets are ready.", flush=True)
 
