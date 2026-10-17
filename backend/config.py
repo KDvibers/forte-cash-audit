@@ -3,8 +3,40 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
+
+
+def normalize_public_origin(value: str | None) -> str | None:
+    """Accept one HTTPS DNS origin, never a URL with credentials or a route."""
+    if value is None:
+        return None
+    error = "CASH_AUDIT_PUBLIC_ORIGIN must be an HTTPS DNS origin without credentials, path, query or fragment"
+    if (not isinstance(value, str) or not value or value != value.strip()
+            or any(character.isspace() for character in value)
+            or any(character in value for character in ("\\", "?", "#"))):
+        raise ValueError(error)
+    try:
+        parsed = urlsplit(value)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        raise ValueError(error) from None
+    if (parsed.scheme != "https" or parsed.username is not None or parsed.password is not None
+            or parsed.path not in ("", "/") or not host or len(host) > 253
+            or "." not in host or host.endswith((".localhost", ".local"))):
+        raise ValueError(error)
+    # ASCII DNS labels include punycode; IP literals and all-numeric suffixes do not.
+    if (not re.fullmatch(r"[A-Za-z0-9.-]+", host)
+            or not re.fullmatch(r"[a-z][a-z0-9-]*", host.rsplit(".", 1)[-1])
+            or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                   for label in host.split("."))
+            or (port is not None and not 1 <= port <= 65535)
+            or parsed.netloc.endswith(":")):
+        raise ValueError(error)
+    authority = host if port in (None, 443) else f"{host}:{port}"
+    return f"https://{authority}"
 
 
 @dataclass
@@ -21,10 +53,12 @@ class Settings:
     retention_hours: float = 24
     worker_startup_seconds: float = 90
     ffprobe_path: str | None = None
+    public_origin: str | None = None
 
     def __post_init__(self):
         self.data_dir = Path(self.data_dir).expanduser().resolve()
         self.mode = self.mode.lower()
+        self.public_origin = normalize_public_origin(self.public_origin)
         if self.mode not in {"real", "mock"}:
             raise ValueError("CASH_AUDIT_MODE must be real or mock")
         if self.mock_scenario not in {"clean", "one", "multiple", "error"}:
@@ -55,6 +89,7 @@ class Settings:
             "MAX_PENDING_JOBS": ("max_pending_jobs", int), "UPLOAD_RATE_PER_MINUTE": ("upload_rate_per_minute", int),
             "RETENTION_HOURS": ("retention_hours", float), "WORKER_STARTUP_SECONDS": ("worker_startup_seconds", float),
             "FFPROBE_PATH": ("ffprobe_path", str),
+            "PUBLIC_ORIGIN": ("public_origin", str),
         }
         return cls(**{name: cast(os.environ["CASH_AUDIT_" + key]) for key, (name, cast) in fields.items()
                       if os.environ.get("CASH_AUDIT_" + key)})
