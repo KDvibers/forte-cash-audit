@@ -56,6 +56,33 @@
       .map(({ event }) => event);
   }
 
+  function sourceFileInfo(value) {
+    if (!record(value)) return {};
+    const info = {};
+    if (validText(value.name)) info.name = value.name;
+    if (Number.isSafeInteger(value.size) && value.size >= 0) info.size = value.size;
+    if (Number.isSafeInteger(value.lastModified) && value.lastModified >= 0) info.lastModified = value.lastModified;
+    return info;
+  }
+
+  function matchSourceFile(file, expected) {
+    if (!record(file) || typeof file.name !== "string" || !/\.mov$/i.test(file.name)) {
+      return "Выберите исходную запись в формате MOV.";
+    }
+    if (!Number.isSafeInteger(file.size) || file.size <= 0) return "Выбранный файл пуст или недоступен для просмотра.";
+    const info = sourceFileInfo(expected);
+    if (info.name !== undefined && file.name !== info.name) {
+      return "Имя файла отличается от сохранённого в отчёте. Выберите ту запись, которую отправляли на проверку.";
+    }
+    if (info.size !== undefined && file.size !== info.size) {
+      return "Размер файла отличается от сохранённого в отчёте. Выберите исходную запись без изменений.";
+    }
+    if (info.lastModified !== undefined && file.lastModified !== info.lastModified) {
+      return "Дата изменения файла отличается от сохранённой. Выберите исходную запись; копия или изменённый файл могут иметь другую дату.";
+    }
+    return null;
+  }
+
   function element(tag, className = "", value) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -74,19 +101,27 @@
     return current === state && !state.disposed;
   }
 
+  function releaseVideo(state) {
+    window.clearTimeout(state.mediaTimer);
+    const video = state.video;
+    const videoUrl = state.videoUrl;
+    state.video = state.videoUrl = state.mediaTimer = null;
+    state.pendingSeek = state.requestedSeek = null;
+    if (video) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+  }
+
   function clear() {
     const previous = current;
     current = null;
     if (previous) {
       previous.disposed = true;
-      window.clearTimeout(previous.mediaTimer);
       if (previous.dialog?.open) previous.dialog.close();
-      if (previous.video) {
-        previous.video.pause();
-        previous.video.removeAttribute("src");
-        previous.video.load();
-      }
-      if (previous.videoUrl) URL.revokeObjectURL(previous.videoUrl);
+      releaseVideo(previous);
       previous.report.querySelectorAll("img").forEach((image) => image.removeAttribute("src"));
     }
     const report = previous?.report || (typeof document !== "undefined" ? document.getElementById("report") : null);
@@ -118,8 +153,11 @@
 
   function seek(state, seconds) {
     if (!live(state) || !validTime(seconds)) return;
+    state.desiredSeek = seconds;
     if (!state.video || state.mediaFailed) {
-      feedback(state, "Переход недоступен: браузер не открыл исходное видео. Таймкоды и кадры можно изучить отдельно.");
+      feedback(state, !state.video
+        ? "Выберите исходное видео ниже для перехода к этой отметке. Файл откроется только в браузере; повторного анализа не будет."
+        : "Переход недоступен: браузер не открыл исходное видео. Таймкоды и кадры можно изучить отдельно.");
       return;
     }
     state.video.pause();
@@ -160,6 +198,68 @@
     return node;
   }
 
+  function attachVideo(state, file, jumpToSelection = false) {
+    if (!live(state)) return;
+    let videoUrl = null;
+    let video = null;
+    try {
+      videoUrl = URL.createObjectURL(file);
+      video = element("video", "report-video");
+      video.controls = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = "metadata";
+      video.setAttribute("aria-label", "Исходное видео для проверки таймкодов");
+      video.addEventListener("loadedmetadata", () => {
+        if (!live(state) || state.video !== video) return;
+        window.clearTimeout(state.mediaTimer);
+        if (state.pendingSeek !== null) seek(state, state.pendingSeek);
+        else feedback(state, Number.isFinite(video.duration) && video.duration > 0
+          ? `Длительность: ${formatTimestamp(video.duration)}. Выберите таймкод для перехода.`
+          : "Браузер не определил длительность записи. Кадры и описание можно изучить без плеера.");
+      });
+      video.addEventListener("seeked", () => {
+        if (live(state) && state.video === video) finishSeek(state);
+      });
+      video.addEventListener("error", () => {
+        if (!live(state) || state.video !== video) return;
+        state.mediaFailed = true;
+        state.pendingSeek = state.requestedSeek = null;
+        window.clearTimeout(state.mediaTimer);
+        video.hidden = true;
+        state.sourcePicker.hidden = false;
+        feedback(state, "Браузер не смог воспроизвести MOV: его кодек может не поддерживаться. Результат анализа, описание и кадры доступны независимо от плеера. Повторный выбор файла не изменит его кодек.");
+      });
+      const target = jumpToSelection
+        ? (validTime(state.desiredSeek) ? state.desiredSeek : state.events[state.selectedIndex]?.timecode_sec)
+        : null;
+      releaseVideo(state);
+      state.video = video;
+      state.videoUrl = videoUrl;
+      state.mediaFailed = false;
+      state.pendingSeek = validTime(target) ? target : null;
+      state.videoHost.replaceChildren(video);
+      state.sourceButton.textContent = "Выбрать исходное видео снова";
+      feedback(state, "Открываем исходное видео в браузере…");
+      video.src = videoUrl;
+      state.mediaTimer = window.setTimeout(() => {
+        if (live(state) && state.video === video && video.readyState < 1 && !state.mediaFailed) {
+          feedback(state, "Браузер пока не открыл видео. Если кодек MOV не поддерживается, изучите описание и кадры: они не зависят от плеера.");
+        }
+      }, 12000);
+    } catch {
+      if (state.video === video && video !== null) {
+        releaseVideo(state);
+        state.videoHost.replaceChildren();
+        state.mediaFailed = true;
+      } else if (videoUrl) {
+        URL.revokeObjectURL(videoUrl);
+      }
+      state.sourcePicker.hidden = false;
+      feedback(state, "Не удалось открыть выбранное видео. Повторите выбор файла для локального просмотра. Отчёт и кадры сохранены.");
+    }
+  }
+
   function makeVideo(state, file) {
     const section = element("section", "report-video-review");
     state.videoSection = section;
@@ -168,53 +268,60 @@
     section.setAttribute("aria-labelledby", heading.id);
     section.append(heading);
     const note = element("p", "report-video-note", "Нажмите на событие или таймкод кадра, чтобы перейти к этому моменту. Воспроизведение запускается только кнопкой плеера.");
+    state.videoHost = element("div", "report-video-host");
     state.videoFeedback = element("p", "report-video-feedback");
     state.videoFeedback.setAttribute("role", "status");
     state.videoFeedback.setAttribute("aria-live", "polite");
-    if (file) {
-      try {
-        const video = element("video", "report-video");
-        state.video = video;
-        video.controls = true;
-        video.muted = true;
-        video.playsInline = true;
-        video.preload = "metadata";
-        video.setAttribute("aria-label", "Исходное видео для проверки таймкодов");
-        video.addEventListener("loadedmetadata", () => {
-          if (!live(state)) return;
-          window.clearTimeout(state.mediaTimer);
-          if (state.pendingSeek !== null) seek(state, state.pendingSeek);
-          else feedback(state, Number.isFinite(video.duration) && video.duration > 0
-            ? `Длительность: ${formatTimestamp(video.duration)}. Выберите таймкод для перехода.`
-            : "Браузер не определил длительность записи. Кадры и описание можно изучить без плеера.");
-        });
-        video.addEventListener("seeked", () => finishSeek(state));
-        video.addEventListener("error", () => {
-          if (!live(state)) return;
-          state.mediaFailed = true;
-          state.pendingSeek = state.requestedSeek = null;
-          window.clearTimeout(state.mediaTimer);
-          video.hidden = true;
-          feedback(state, "Браузер не смог воспроизвести MOV: его кодек может не поддерживаться. Результат анализа, описание и кадры доступны независимо от плеера.");
-        });
-        state.videoUrl = URL.createObjectURL(file);
-        video.src = state.videoUrl;
-        section.append(video);
-        state.videoFeedback.textContent = "Открываем исходное видео в браузере…";
-        state.mediaTimer = window.setTimeout(() => {
-          if (live(state) && video.readyState < 1 && !state.mediaFailed) {
-            feedback(state, "Браузер пока не открыл видео. Если кодек MOV не поддерживается, изучите описание и кадры: они не зависят от плеера.");
-          }
-        }, 12000);
-      } catch {
-        state.mediaFailed = true;
-        state.video = null;
-        state.videoFeedback.textContent = "Не удалось открыть исходное видео в браузере. Описание и кадры результата доступны ниже.";
+    state.sourcePicker = element("div", "report-source-picker");
+    state.sourcePicker.hidden = Boolean(file);
+    const explanation = element("p", "report-source-explanation", "Для локального просмотра выберите исходную запись. После обновления страницы её нужно выбрать повторно: браузер не сохраняет доступ к файлу. Этот выбор не отправляет видео на сервер и не запускает новый анализ.");
+    const metadataNote = element("p", "report-source-metadata", Object.keys(state.sourceInfo).length
+      ? "Сравниваем сохранённые имя, размер и дату изменения, если они известны. Совпадение этих сведений не подтверждает совпадение содержимого файлов."
+      : "Сведения об исходном файле не сохранились. Выберите запись самостоятельно: сопоставить её с отчётом по содержимому мы не можем.");
+    const input = element("input");
+    input.type = "file";
+    input.accept = ".mov,video/quicktime";
+    input.hidden = true;
+    input.setAttribute("aria-label", "Выберите исходное MOV для локального просмотра без повторного анализа");
+    const sourceError = element("p", "report-source-error");
+    sourceError.hidden = true;
+    sourceError.setAttribute("role", "alert");
+    const sourceStatus = element("p", "report-source-status");
+    sourceStatus.setAttribute("role", "status");
+    state.sourceButton = button("report-source-button button button-secondary", "Выбрать исходное видео", () => {
+      if (!live(state)) return;
+      sourceError.hidden = true;
+      sourceError.textContent = "";
+      sourceStatus.textContent = "";
+      input.value = "";
+      input.click();
+    });
+    input.addEventListener("change", () => {
+      if (!live(state)) return;
+      const chosen = input.files?.[0];
+      input.value = "";
+      if (!chosen) return;
+      sourceStatus.textContent = "";
+      const error = matchSourceFile(chosen, state.sourceInfo);
+      if (error) {
+        sourceError.textContent = error;
+        sourceError.hidden = false;
+        return;
       }
-    } else {
-      state.videoFeedback.textContent = "Исходный файл недоступен на этой странице. Можно изучить описание событий и кадры с таймкодами.";
-    }
-    section.append(note, state.videoFeedback);
+      sourceError.hidden = true;
+      sourceError.textContent = "";
+      sourceStatus.textContent = Object.keys(state.sourceInfo).length
+        ? "Сохранённые сведения совпали. Файл открывается локально; его содержимое не сравнивалось с записью из отчёта."
+        : "Файл открывается локально по вашему выбору. Его соответствие отчёту не проверялось.";
+      attachVideo(state, chosen, true);
+    });
+    input.addEventListener("cancel", () => {
+      if (live(state)) sourceStatus.textContent = "Выбор отменён. Отчёт и текущий просмотр сохранены.";
+    });
+    state.sourcePicker.append(explanation, state.sourceButton, input, metadataNote, sourceError, sourceStatus);
+    section.append(state.videoHost, state.sourcePicker, note, state.videoFeedback);
+    if (file) attachVideo(state, file);
+    else state.videoFeedback.textContent = "Отчёт восстановлен. Для перехода по таймкодам выберите исходное видео; события и кадры уже доступны.";
     return section;
   }
 
@@ -345,7 +452,7 @@
     if (jump) seek(state, event.timecode_sec);
   }
 
-  function show(data, { file = null, mode = "real", onNewVideo } = {}) {
+  function show(data, { file = null, sourceFileInfo: savedSourceInfo = null, mode = "real", onNewVideo } = {}) {
     clear();
     if (!validate(data) || !["mock", "real"].includes(mode) || typeof document === "undefined") return false;
     const report = document.getElementById("report");
@@ -353,6 +460,7 @@
     const state = {
       report, mode, events: chronologicalEvents(data.violations), eventButtons: [], frames: [], selectedIndex: 0,
       video: null, videoUrl: null, mediaTimer: null, pendingSeek: null, requestedSeek: null,
+      desiredSeek: null, sourceInfo: sourceFileInfo(file || savedSourceInfo),
       mediaFailed: false, dialog: null, disposed: false,
     };
     current = state;
@@ -362,7 +470,7 @@
     const heading = element("h2", "", "Результат проверки");
     heading.id = "report-heading";
     group.append(element("p", "report-eyebrow", "Подробный отчёт"), heading,
-      element("p", "report-filename", file && typeof file.name === "string" ? file.name : "Исходная запись"));
+      element("p", "report-filename", state.sourceInfo.name || "Исходная запись"));
     const actions = element("div", "report-header-actions");
     const verdict = element("div", "report-verdict");
     verdict.dataset.verdict = data.verdict;
@@ -422,6 +530,6 @@
   const api = Object.freeze({ validate, show, clear });
   if (typeof window !== "undefined") window.CashAuditResults = api;
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { ...api, formatTimestamp, chronologicalEvents };
+    module.exports = { ...api, formatTimestamp, chronologicalEvents, matchSourceFile };
   }
 })();

@@ -162,7 +162,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get('/assets/{name}')
     async def frontend_asset(name: str):
         media_types = {'styles.css': 'text/css', 'app.js': 'text/javascript',
-                       'results.css': 'text/css', 'results.js': 'text/javascript'}
+                       'results.css': 'text/css', 'results.js': 'text/javascript',
+                       'recovery.js': 'text/javascript'}
         if name not in media_types:
             raise HTTPException(404, 'Файл не найден.')
         return FileResponse(frontend / name, media_type=media_types[name])
@@ -229,7 +230,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             worker.store.create({'job_id': job_id, 'owner': owner, 'file_name': name,
                                  'file_size': size, 'video_path': str(path.resolve()),
                                  'created_at': processing_started, 'scenario': settings.mock_scenario,
-                                 'upload_id': upload_id})
+                                 'upload_id': upload_id, 'mode': settings.mode})
             created = True
             if time.time() - processing_started >= settings.job_timeout_seconds:
                 worker.store.finish(job_id, error='timeout')
@@ -257,19 +258,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await accept_upload(request, file, x_upload_id,
                                    BrowserSessions.owner(request.state.browser_session))
 
-    def owned_result(job_id: str, owner: str):
+    def owned_job(job_id: str, owner: str):
         job = service().store.get(job_id)
         if not job or job['owner'] != owner:
             raise HTTPException(404, 'Задание не найдено или срок хранения истёк.')
-        return service().public_result(job)
+        return job
 
     @application.get('/api/v1/jobs/{job_id}')
     async def status(job_id: str):
-        return owned_result(job_id, 'api')
+        return service().public_result(owned_job(job_id, 'api'))
 
     @application.get('/ui/jobs/{job_id}')
     async def browser_status(job_id: str, request: Request):
-        return owned_result(job_id, BrowserSessions.owner(request.state.browser_session))
+        job = owned_job(job_id, BrowserSessions.owner(request.state.browser_session))
+        return JSONResponse(service().public_result(job), headers={
+            'X-Cash-Audit-Job-Mode': job['mode'] or 'unknown',
+        })
+
+    @application.get('/ui/recovery/{upload_id}')
+    async def browser_recovery(upload_id: str, request: Request):
+        # Read-only lookup also recovers a lost POST acknowledgement, without reuploading.
+        try:
+            upload_id = str(uuid.UUID(upload_id))
+        except ValueError:
+            raise HTTPException(404, 'Проверка не найдена в текущей сессии.')
+        owner = BrowserSessions.owner(request.state.browser_session)
+        job = service().store.by_upload_id(owner, upload_id)
+        if not job:
+            raise HTTPException(404, 'Загрузка ещё не зарегистрирована или срок хранения проверки истёк.')
+        return {'job_id': job['job_id'], 'status': job['status'], 'mode': job['mode'],
+                'file_name': job['file_name'], 'file_size': job['file_size'],
+                'created_at': job['created_at']}
 
     return application
 

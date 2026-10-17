@@ -21,10 +21,15 @@ class JobStore:
                     status TEXT NOT NULL DEFAULT 'processing' CHECK(status IN ('processing','done','failed')),
                     result_json TEXT, error_code TEXT, created_at REAL NOT NULL,
                     started_at REAL, finished_at REAL, scenario TEXT NOT NULL DEFAULT 'one', upload_id TEXT,
+                    mode TEXT CHECK(mode IN ('mock', 'real') OR mode IS NULL),
                     UNIQUE(owner, upload_id)
                 );
                 CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);
             """)
+            # Earlier jobs have no recorded mode. Do not guess real vs synthetic.
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
+            if 'mode' not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN mode TEXT CHECK(mode IN ('mock', 'real') OR mode IS NULL)")
 
     @contextmanager
     def connection(self):
@@ -45,7 +50,7 @@ class JobStore:
                        "finished_at=? WHERE status='processing'", (time.time(),))
 
     def create(self, job: dict):
-        allowed = {"job_id", "owner", "file_name", "file_size", "video_path", "created_at", "scenario", "upload_id"}
+        allowed = {"job_id", "owner", "file_name", "file_size", "video_path", "created_at", "scenario", "upload_id", "mode"}
         if not set(job).issubset(allowed):
             raise ValueError("Unexpected job fields")
         keys = tuple(job)

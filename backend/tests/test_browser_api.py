@@ -260,7 +260,7 @@ def test_only_explicit_frontend_assets_are_public(browser_service):
     client = browser_service
     for path, content_type in (("/", "text/html"), ("/assets/styles.css", "text/css"),
                                ("/assets/app.js", "javascript"), ("/assets/results.js", "javascript"),
-                               ("/assets/results.css", "text/css")):
+                               ("/assets/results.css", "text/css"), ("/assets/recovery.js", "javascript")):
         response = client.get(path)
         assert response.status_code == 200, path
         assert content_type in response.headers["content-type"], path
