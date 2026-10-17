@@ -1,6 +1,6 @@
 """Run a small public-API smoke check without exposing the API key or image data.
 
-Usage: python -m backend.check_api [--video path.mov] [--key-file path.txt]
+Usage: python -m backend.check_api [--expect-mode real] [--video path.mov] [--key-file path.txt]
 The default input is a locally generated neutral MOV, not bank footage.
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ import uuid
 
 from .config import Settings
 from .make_sample import create_sample
+from .validation import validate_result
 
 
 STARTUP_TIMEOUT_SECONDS = 100
@@ -118,10 +119,11 @@ def poll(opener, url: str, key: str, job_id: str) -> int:
                               timeout=min(15, max(0.1, deadline - time.monotonic())))
         status = result.get("status")
         if status == "done":
-            verdict, events = result.get("verdict"), result.get("violations")
-            if (not isinstance(verdict, str) or verdict not in {"violation", "no_violation"}
-                    or not isinstance(events, list)):
-                raise CheckError("Ответ done не соответствует формату результата.")
+            try:
+                validated = validate_result(result)
+            except ValueError as exc:
+                raise CheckError("Ответ done не соответствует контракту результата или содержит повреждённые JPEG-кадры.") from exc
+            verdict, events = validated["verdict"], validated["violations"]
             print(f"Статус: done; вердикт: {verdict}; событий: {len(events)}")
             return 0
         if status == "failed":
@@ -138,6 +140,8 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--video", type=Path, help="Путь к MOV; по умолчанию нейтральный тестовый ролик.")
     parser.add_argument("--key-file", type=Path, help="Файл с ключом; значение ключа в командную строку не передаётся.")
+    parser.add_argument("--expect-mode", choices=("real", "mock"),
+                        help="Остановиться до отправки видео, если сервер работает в другом режиме.")
     args = parser.parse_args()
     try:
         url = base_url(args.base_url)
@@ -148,6 +152,8 @@ def main() -> int:
         if not isinstance(mode, str) or mode not in {"mock", "real"}:
             raise CheckError("Сервер не сообщил корректный режим обработки.")
         print(f"Режим: {mode}")
+        if args.expect_mode is not None and mode != args.expect_mode:
+            raise CheckError(f"Ожидался режим {args.expect_mode}, сервер работает в режиме {mode}. Видео не отправлено.")
         if mode == "mock":
             print("ТЕСТОВЫЙ РЕЖИМ: ответы и кадры синтетические.")
         video = args.video
@@ -156,7 +162,20 @@ def main() -> int:
             print("Вход: нейтральный синтетический MOV. Эта проверка не измеряет точность модели.")
         if not video.is_file() or video.suffix.lower() != ".mov":
             raise CheckError("Не найден файл MOV для проверки.")
-        return poll(opener, url, key, submit(opener, url, key, video))
+        started = time.monotonic()
+        accepted_at = None
+        try:
+            job_id = submit(opener, url, key, video)
+            accepted_at = time.monotonic()
+            print(f"Передача и приём файла: {accepted_at - started:.2f} с.")
+            return poll(opener, url, key, job_id)
+        finally:
+            finished = time.monotonic()
+            if accepted_at is not None:
+                print(f"Ожидание и проверка ответа: {finished - accepted_at:.2f} с.")
+                print(f"Всего от отправки до проверки ответа: {finished - started:.2f} с.")
+            else:
+                print(f"Время попытки отправки: {finished - started:.2f} с.")
     except HTTPError as exc:
         print(f"Ошибка HTTP {exc.code}. Проверьте адрес, ключ и состояние сервера; перенаправления запрещены.")
     except CheckError as exc:
