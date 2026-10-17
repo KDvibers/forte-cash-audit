@@ -4,6 +4,7 @@ param(
     [ValidateRange(1, 65535)][int]$Port = 8000,
     [string]$BindAddress = '127.0.0.1',
     [string]$PythonPath,
+    [ValidateNotNullOrEmpty()][string]$VenvPath = '.venv',
     [switch]$Install,
     [switch]$Dev,
     [switch]$SetupOnly
@@ -11,7 +12,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$venvRoot = if ([System.IO.Path]::IsPathRooted($VenvPath)) {
+    [System.IO.Path]::GetFullPath($VenvPath)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $projectRoot $VenvPath))
+}
+$venvPython = Join-Path $venvRoot 'Scripts\python.exe'
 Set-Location -LiteralPath $projectRoot
 
 function Assert-CommandSucceeded([string]$Action) {
@@ -26,13 +32,13 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     }
     $parentPython = Join-Path (Split-Path -Parent $projectRoot) '.venv\Scripts\python.exe'
     if ($PythonPath) {
-        & $PythonPath -m venv (Join-Path $projectRoot '.venv')
+        & $PythonPath -m venv $venvRoot
     } elseif (Test-Path -LiteralPath $parentPython) {
-        & $parentPython -m venv (Join-Path $projectRoot '.venv')
+        & $parentPython -m venv $venvRoot
     } elseif (Get-Command py -ErrorAction SilentlyContinue) {
-        & py -3.12 -m venv (Join-Path $projectRoot '.venv')
+        & py -3.12 -m venv $venvRoot
     } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-        & python -m venv (Join-Path $projectRoot '.venv')
+        & python -m venv $venvRoot
     } else {
         throw 'Install Python 3.12 or pass -PythonPath with the full path to python.exe.'
     }
