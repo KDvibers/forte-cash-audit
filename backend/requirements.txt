@@ -1,4 +1,5 @@
 fastapi==0.143.3
+starlette==1.8.0
 uvicorn==0.54.0
 python-multipart==0.0.32
 Pillow==13.0.0
