@@ -1,0 +1,36 @@
+{
+  "model_repository": "Qwen/Qwen3-VL-2B-Instruct-GGUF",
+  "model_revision": "52d6c8ffea26cc873ac5ad116f8631268d7eb503",
+  "model_license": "Apache-2.0",
+  "llama_release": "b11669",
+  "assets": [
+    {
+      "name": "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+      "size": 1107409952,
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/52d6c8ffea26cc873ac5ad116f8631268d7eb503/Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+      "sha256": "089d75c52f4b7ffc56ba998ffc50aae89fcafc755f9e7208aacca281dca6c2ae",
+      "target": "models/qwen3-vl-2b/Qwen3VL-2B-Instruct-Q4_K_M.gguf"
+    },
+    {
+      "name": "mmproj-Qwen3VL-2B-Instruct-F16.gguf",
+      "size": 819394848,
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/52d6c8ffea26cc873ac5ad116f8631268d7eb503/mmproj-Qwen3VL-2B-Instruct-F16.gguf",
+      "sha256": "c3d5afbef5287953acd57b4043d2269456e5761a4eaccb3b71b062996970aea5",
+      "target": "models/qwen3-vl-2b/mmproj-Qwen3VL-2B-Instruct-F16.gguf"
+    },
+    {
+      "name": "llama-b11669-bin-win-cuda-13.4-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-win-cuda-13.4-x64.zip",
+      "sha256": "3b92d5c064f5032e603e531d3ec8961f3bd6613e5dfad047399a92dec8e95dbc",
+      "target": ".cache/downloads/llama-b11669-bin-win-cuda-13.4-x64.zip",
+      "extract_to": ".cache/llama-b11669"
+    },
+    {
+      "name": "cudart-llama-bin-win-cuda-13.4-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/cudart-llama-bin-win-cuda-13.4-x64.zip",
+      "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668",
+      "target": ".cache/downloads/cudart-llama-bin-win-cuda-13.4-x64.zip",
+      "extract_to": ".cache/llama-b11669"
+    }
+  ]
+}
