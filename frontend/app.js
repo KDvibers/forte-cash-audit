@@ -14,6 +14,7 @@
   const dialog = el("help-dialog");
   const openHelp = el("open-help");
   const resultPanel = el("result-live");
+  const report = window.CashAuditResults;
   let config = null;
   let ready = false;
   let file = null;
@@ -68,6 +69,10 @@
   }
 
   function result(state, title, description, count = "", icon = "i-clock") {
+    if (state !== "done") {
+      report?.clear();
+      el("open-report").hidden = true;
+    }
     el("result-empty").hidden = true;
     resultPanel.hidden = false;
     resultPanel.dataset.state = state;
@@ -116,6 +121,8 @@
     generation += 1;
     stopTimers();
     file = uploadId = jobId = null;
+    report?.clear();
+    el("open-report").hidden = true;
     input.value = "";
     text("file-name", "");
     text("file-size", "");
@@ -366,6 +373,18 @@
   }
 
   function complete(data) {
+    if (data.status === "done") {
+      try {
+        if (!report?.show(data, { file, mode: config.mode, onNewVideo: () => reset() })) {
+          pauseQuery("Не удалось открыть полный результат. Можно повторно запросить это же задание.");
+          return;
+        }
+      } catch {
+        report?.clear();
+        pauseQuery("Не удалось отобразить результат. Можно повторно запросить это же задание.");
+        return;
+      }
+    }
     active = false;
     stopTimers();
     elapsed();
@@ -381,16 +400,19 @@
       const mock = config.mode === "mock";
       text("selection-state", "Проверка завершена");
       text("selection-note", "Можно выбрать следующее видео.");
-      const title = violation ? "Обнаружены нарушения" : "Нарушений не обнаружено";
+      const title = violation ? "Обнаружены признаки возможных нарушений" : "Нарушений не обнаружено";
       result("done", mock ? `Тест: ${title.toLowerCase()}` : title,
         mock ? "Это синтетический результат тестового анализатора, он не описывает содержимое загруженного видео."
-          : "Анализ завершён. Ниже показано количество событий, которые вернул анализатор.",
+          : "Анализ завершён. Изучите события, полные объяснения и кадры в результате проверки.",
         `Событий: ${data.violations.length}`, violation ? "i-info" : "i-check");
       resultPanel.dataset.verdict = data.verdict;
-      text("upload-status", `${mock ? "Тестовая проверка" : "Проверка"} завершена. ${violation ? "Обнаружены нарушения." : "Нарушений не обнаружено."} Событий: ${data.violations.length}.`);
+      el("open-report").hidden = false;
+      text("open-report", violation ? "События и кадры" : "Открыть результат");
+      text("upload-status", `${mock ? "Тестовая проверка" : "Проверка"} завершена. ${violation ? "Обнаружены признаки возможных нарушений." : "Нарушений не обнаружено."} Событий: ${data.violations.length}.`);
     }
     controls();
-    resultPanel.focus();
+    if (data.status === "done") el("report").focus();
+    else resultPanel.focus();
   }
 
   async function pollJob(run) {
@@ -414,9 +436,7 @@
       queryFailures = 0;
       if (data.status === "failed") { complete(data); return; }
       if (data.status === "done") {
-        if (!["violation", "no_violation"].includes(data.verdict) || !Array.isArray(data.violations) ||
-            (data.verdict === "no_violation" && data.violations.length !== 0) ||
-            (data.verdict === "violation" && data.violations.length === 0)) {
+        if (!report?.validate(data)) {
           pauseQuery("Сервер вернул неполный результат. Не делаем вывод по видео; можно повторить запрос этого же задания.");
           return;
         }
