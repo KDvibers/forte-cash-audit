@@ -56,7 +56,7 @@ if ($SetupOnly) {
 
 $env:CASH_AUDIT_MODE = $Mode
 $env:CASH_AUDIT_MOCK_SCENARIO = $Scenario
-Write-Host "API: http://${BindAddress}:$Port | mode: $Mode"
+Write-Host "Interface + API: http://${BindAddress}:$Port | mode: $Mode"
 if ($Mode -eq 'mock') {
     Write-Host "MOCK: synthetic results only; scenario: $Scenario. No model inference."
 }

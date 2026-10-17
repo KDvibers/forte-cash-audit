@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#7366ed">
-  <meta name="description" content="Forte Audit — удобное рабочее пространство для проверки видео кассовых операций.">
+  <meta name="theme-color" content="#650421">
+  <meta name="description" content="Forte Audit — проверка видео кассовых операций. Загрузите запись и получите результат анализа.">
   <title>Проверка видео · Forte Audit</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%237366ed'/%3E%3Cpath d='M12 11h17v5H18v5h9v5h-9v5h-6z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="./styles.css">
-  <script src="./app.js" defer></script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23650421'/%3E%3Cpath d='M12 11h17v5H18v5h9v5h-9v5h-6z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#workspace">Перейти к загрузке видео</a>
@@ -30,143 +30,142 @@
     </defs>
   </svg>
 
-  <div class="page-orbit orbit-one" aria-hidden="true"></div>
-  <div class="page-orbit orbit-two" aria-hidden="true"></div>
 
   <div class="app-shell">
     <aside class="sidebar" aria-label="Быстрая навигация">
-      <a class="brand-mark" href="#top" aria-label="Forte Audit — начало страницы"><span></span><span></span><span></span><span></span></a>
+      <a class="brand-mark" href="#top" aria-label="Forte Audit — начало страницы"><svg viewBox="0 0 44 48" fill="none" aria-hidden="true"><path d="M9 20v-6C9 7 13 4 20 4h19v5c0 5-3 7-8 7H19c-5 0-8 1-10 4Z" fill="white"/><path d="M9 44V30c0-8 4-12 12-12h12v5c0 4-2 6-6 6h-7v15H9Z" fill="white"/></svg></a>
       <nav class="side-nav" aria-label="Разделы страницы">
-        <a class="side-link active" href="#workspace" aria-label="Загрузить видео" title="Загрузить видео"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg><span>Проверка</span></a>
-        <a class="side-link" href="#guide" aria-label="Как работает проверка" title="Как работает проверка"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span>Как это<br>работает</span></a>
+        <a class="side-link active" href="#workspace" aria-label="Загрузить видео" title="Загрузить видео"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg></a>
+        <a class="side-link" href="#guide" aria-label="Как работает проверка" title="Как работает проверка"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></a>
       </nav>
-      <div class="sidebar-bottom" aria-hidden="true"><span class="side-decoration"></span><span>FA</span></div>
+      <span class="sidebar-caption" aria-hidden="true">AUDIT</span>
     </aside>
 
     <main class="main-content" id="top">
       <header class="topbar">
-        <a href="#top" class="wordmark" aria-label="Forte Audit — начало страницы">forte<span class="wordmark-divider">/</span><span class="wordmark-light">audit</span><span class="brand-dot"></span></a>
+        <a href="#top" class="wordmark" aria-label="Forte Audit — начало страницы"><strong>Forte</strong> Audit</a>
         <nav class="top-nav" aria-label="Основная навигация">
-          <a class="top-link current" href="#workspace"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>Проверка видео</a>
+          <a class="top-link current" href="#workspace">Проверка видео</a>
           <a class="top-link" href="#guide">Как это работает</a>
         </nav>
         <div class="top-actions">
-          <span class="preview-badge"><span></span>Предпросмотр</span>
+          <span class="mode-badge" id="mode-badge">Подключение</span>
           <button class="icon-button help-button" id="open-help" type="button" aria-label="Помощь по проверке видео" title="Помощь"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></button>
         </div>
       </header>
 
       <section class="hero" aria-labelledby="page-title">
         <div class="hero-copy">
-          <p class="eyebrow"><span></span>Внимание к каждой детали</p>
-          <h1 id="page-title">Проверьте кассовую<br><span>операцию.</span><svg class="heading-sparkle" viewBox="0 0 44 44" fill="none" aria-hidden="true"><path d="m22 5 4.5 12.5L39 22l-12.5 4.5L22 39l-4.5-12.5L5 22l12.5-4.5Z" stroke="currentColor" stroke-width="1.6"/><path d="m35 3 1.5 4.5L41 9l-4.5 1.5L35 15l-1.5-4.5L29 9l4.5-1.5Z" fill="currentColor"/></svg></h1>
-          <p class="hero-description">От видеозаписи — к понятным событиям,<br class="desktop-break"> точным моментам и доказательствам.</p>
+          <h1 id="page-title">Проверка кассовых<br>операций</h1>
+          <p class="hero-description">От видеозаписи — к событиям и доказательствам</p>
         </div>
-        <div class="feature-cards" aria-label="Что поможет проверить результат">
-          <article class="feature-card feature-time">
-            <svg class="feature-art" viewBox="0 0 116 82" fill="none" aria-hidden="true">
-              <g transform="rotate(-9 49 43)" stroke="#252039" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="19" y="16" width="62" height="51" rx="7" fill="#F0ECFF"/><path d="M20 29h60M28 17v11m13-11v11m13-11v11m13-11v11"/>
-                <path d="m43 38 14 8-14 8Z" fill="white"/>
-              </g>
-              <circle cx="82" cy="55" r="21" fill="white" stroke="#252039" stroke-width="1.6"/>
-              <circle cx="82" cy="55" r="16" fill="#E5DEFF"/><path d="M82 44v11l7 4" stroke="#6E5DE1" stroke-width="2" stroke-linecap="round"/>
-              <path d="m96 12 2 5 5 2-5 2-2 5-2-5-5-2 5-2Z" fill="#A294EF"/>
-            </svg>
-            <h2>Нужный момент</h2>
-            <p>Таймкод каждого события</p>
-            <span class="feature-corner" aria-hidden="true">01</span>
-          </article>
-          <article class="feature-card feature-proof">
-            <svg class="feature-art" viewBox="0 0 116 82" fill="none" aria-hidden="true">
-              <g transform="rotate(9 66 41)" stroke="#252039" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="42" y="9" width="49" height="60" rx="6" fill="white"/><path d="M53 21h25M53 28h19M53 52h25M53 59h17"/><rect x="52" y="35" width="27" height="10" rx="3" fill="#E6DFFF" stroke="none"/>
-              </g>
-              <g transform="rotate(-14 34 48)" stroke="#252039" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="16" y="29" width="40" height="39" rx="5" fill="#E6DFFF"/><rect x="21" y="34" width="30" height="23" rx="2" fill="white"/><path d="m22 53 8-9 8 7 6-5 6 8M26 62h18"/><circle cx="42" cy="40" r="2" fill="#A294EF" stroke="none"/>
-              </g>
-              <path d="m99 53 2 6 6 2-6 2-2 6-2-6-6-2 6-2Z" fill="#A294EF"/>
-            </svg>
-            <h2>Кадры и правила</h2>
-            <p>Кадры и объяснение правила</p>
-            <span class="feature-corner" aria-hidden="true">02</span>
-          </article>
-        </div>
+        <svg class="hero-art" viewBox="0 0 600 270" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="ribbon-a" x1="90" y1="170" x2="560" y2="50" gradientUnits="userSpaceOnUse"><stop stop-color="#FFE7E9" stop-opacity="0"/><stop offset=".45" stop-color="#FFC6D2" stop-opacity=".7"/><stop offset="1" stop-color="#FCEAF0" stop-opacity=".4"/></linearGradient>
+            <linearGradient id="ribbon-b" x1="150" y1="270" x2="510" y2="140" gradientUnits="userSpaceOnUse"><stop stop-color="#FFCEBB" stop-opacity=".25"/><stop offset=".5" stop-color="#FFB4CA" stop-opacity=".55"/><stop offset="1" stop-color="#FFE5EB" stop-opacity="0"/></linearGradient>
+            <linearGradient id="film-side" x1="222" y1="45" x2="445" y2="219" gradientUnits="userSpaceOnUse"><stop stop-color="#ED4580"/><stop offset=".45" stop-color="#970C40"/><stop offset="1" stop-color="#590421"/></linearGradient>
+            <linearGradient id="film-face" x1="225" y1="61" x2="405" y2="207" gradientUnits="userSpaceOnUse"><stop stop-color="#A70E43"/><stop offset="1" stop-color="#650422"/></linearGradient>
+            <linearGradient id="film-screen" x1="274" y1="68" x2="361" y2="198" gradientUnits="userSpaceOnUse"><stop stop-color="#F0528D"/><stop offset="1" stop-color="#BC1554"/></linearGradient>
+            <linearGradient id="paper" x1="430" y1="29" x2="553" y2="257" gradientUnits="userSpaceOnUse"><stop stop-color="white"/><stop offset="1" stop-color="#F5E8ED"/></linearGradient>
+            <linearGradient id="fade-bottom" x1="450" y1="193" x2="450" y2="272" gradientUnits="userSpaceOnUse"><stop stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></linearGradient>
+            <linearGradient id="bar-pink" x1="440" y1="59" x2="491" y2="77" gradientUnits="userSpaceOnUse"><stop stop-color="#E9437F"/><stop offset="1" stop-color="#BD0A50"/></linearGradient>
+            <filter id="art-shadow" x="-35%" y="-30%" width="180%" height="180%"><feDropShadow dx="3" dy="12" stdDeviation="10" flood-color="#B8486B" flood-opacity=".14"/></filter>
+            <mask id="paper-fade"><rect x="400" y="0" width="180" height="270" fill="url(#fade-bottom)"/></mask>
+          </defs>
+          <path d="M0 226C142 51 192 155 295 78 386 11 470-22 600 8V137C502 82 441 91 362 152 222 261 145 118 0 226Z" fill="url(#ribbon-a)"/>
+          <path d="M52 271C159 137 222 113 328 180 407 230 459 84 600 114V217C461 139 434 308 322 247 217 190 139 210 52 271Z" fill="url(#ribbon-b)"/>
+          <path d="M47 208C210 100 293 294 467 213" stroke="white" stroke-opacity=".85"/>
+          <g filter="url(#art-shadow)">
+            <path d="M222 43 398 70Q416 73 416 90V213Q416 226 403 223L225 195Q211 193 211 178V57Q211 40 222 43Z" fill="url(#film-side)"/>
+            <path d="m224 48 174 29q12 2 12 14v117q0 11-10 10l-175-28q-9-1-9-13V60q0-14 8-12Z" fill="url(#film-face)" stroke="#F772A0" stroke-opacity=".4"/>
+            <path d="m269 65 95 16q10 2 10 13v101q0 9-9 8l-95-16q-9-1-9-11V75q0-12 8-10Z" fill="url(#film-screen)" stroke="#F37BA4" stroke-opacity=".5"/>
+            <g fill="#FFF8FA"><path d="m229 57 12 2v16l-12-2Z"/><path d="m229 87 12 2v16l-12-2Z"/><path d="m229 117 12 2v16l-12-2Z"/><path d="m229 147 12 2v16l-12-2Z"/><path d="m229 177 12 2v10l-12-2Z"/><path d="m385 83 12 2v16l-12-2Z"/><path d="m385 113 12 2v16l-12-2Z"/><path d="m385 143 12 2v16l-12-2Z"/><path d="m385 173 12 2v16l-12-2Z"/></g>
+            <path d="m305 104 30 28q5 4 0 8l-30 21q-5 3-5-4v-49q0-8 5-4Z" fill="#FFBCD2" stroke="#FFDEE9" stroke-width="1.4"/>
+          </g>
+          <g mask="url(#paper-fade)">
+            <path d="m437 29 105-11q14-1 15 14v214q0 14-14 15l-105 9Z" fill="#DBC3CC"/>
+            <path d="m431 31 107-12q13-1 13 12v216q0 12-13 14l-107 12q-14 1-14-13V46q0-13 14-15Z" fill="url(#paper)" stroke="white"/>
+            <g transform="skewY(-6)"><rect x="436" y="108" width="96" height="11" rx="3" fill="#E8D3D9"/><rect x="436" y="108" width="40" height="11" rx="3" fill="url(#bar-pink)"/><rect x="436" y="133" width="72" height="11" rx="3" fill="url(#bar-pink)"/><rect x="436" y="158" width="96" height="9" rx="3" fill="#D8C2CA"/><rect x="436" y="180" width="83" height="9" rx="3" fill="#D8C2CA"/><rect x="436" y="202" width="57" height="9" rx="3" fill="#D8C2CA"/><rect x="436" y="239" width="94" height="8" rx="3" fill="#D8C2CA"/><rect x="436" y="260" width="84" height="8" rx="3" fill="#D8C2CA"/></g>
+          </g>
+        </svg>
       </section>
+
+      <div class="connection-panel" role="status" aria-live="polite">
+        <span class="connection-label"><span class="connection-dot" aria-hidden="true"></span><span id="connection-message">Подключаемся к серверу…</span></span>
+        <span class="mode-notice" id="mode-notice" hidden></span>
+        <button class="text-button" id="connection-retry" type="button" hidden>Подключиться снова</button>
+      </div>
 
       <div class="workspace-grid" id="workspace" tabindex="-1">
         <section class="card upload-card" aria-labelledby="upload-heading">
-          <div class="card-heading">
-            <div class="section-title"><span class="section-icon"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg></span><h2 id="upload-heading">Новое видео</h2></div>
-            <span class="quiet-label">Одна запись за проверку</span>
-          </div>
-          <div class="drop-zone" id="drop-zone" data-state="idle" role="group" aria-labelledby="upload-heading" aria-describedby="file-requirements preview-note">
+          <div class="card-heading"><h2 id="upload-heading">Новое видео</h2><span class="quiet-label">Одна запись за проверку</span></div>
+          <div class="drop-zone" id="drop-zone" data-state="idle" role="group" aria-labelledby="upload-heading" aria-describedby="file-requirements upload-note">
             <input id="video-input" type="file" accept=".mov,video/quicktime" hidden aria-label="Выберите видео MOV">
             <div class="upload-empty" id="upload-empty">
-              <div class="upload-illustration" aria-hidden="true">
-                <span class="upload-orbit"></span>
-                <div class="video-tile"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span>.mov</span></div>
-                <span class="upload-plus">+</span>
-              </div>
+              <div class="upload-illustration" aria-hidden="true"><div class="video-tile"><span class="film-edge"></span><svg class="icon"><use href="#i-play"/></svg><span class="film-edge"></span></div><span class="upload-plus"><svg class="icon"><use href="#i-arrow"/></svg></span></div>
               <h3>Перетащите видео сюда</h3>
               <p class="drop-description">или выберите файл на компьютере</p>
-              <button class="button button-primary" id="choose-video" type="button"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Выбрать видео</button>
-              <p class="file-requirements" id="file-requirements">Формат MOV<span>·</span>до 100 МиБ</p>
+              <button class="button button-primary" id="choose-video" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Выбрать видео</button>
+              <p class="file-requirements" id="file-requirements"><span id="max-file-size">MOV · до 100 МиБ</span></p>
             </div>
             <div class="upload-selected" id="upload-selected" hidden>
-              <div class="selected-file-icon" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span class="selected-check"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg></span></div>
-              <span class="selection-label">Видео выбрано</span>
+              <div class="selected-file-icon" aria-hidden="true"><svg class="icon"><use href="#i-play"/></svg></div>
+              <p class="selection-label" id="selection-state">Видео выбрано</p>
               <h3 id="file-name"></h3>
               <p class="file-size" id="file-size"></p>
-              <p class="selection-note">В этом предпросмотре файл<br>не отправляется на сервер.</p>
+              <p class="selection-note" id="selection-note"></p>
+              <div class="transfer-area"><progress id="transfer-progress" max="100" value="0" aria-label="Передача видео на сервер" hidden></progress><p id="transfer-label"></p></div>
+              <p class="elapsed-time" id="elapsed-time"></p>
               <div class="selection-actions">
-                <button class="button button-secondary" id="replace-video" type="button">Выбрать другое видео</button>
-                <button class="icon-button remove-button" id="remove-video" type="button" aria-label="Убрать выбранное видео" title="Убрать видео"><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg></button>
+                <button class="button button-secondary" id="replace-video" type="button" hidden>Выбрать другое видео</button>
+                <button class="icon-button remove-button" id="remove-video" type="button" aria-label="Убрать выбранное видео" title="Убрать видео" hidden><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg></button>
+                <button class="button button-primary" id="new-video" type="button" hidden>Проверить другое видео</button>
+                <button class="button button-secondary" id="retry-action" type="button" hidden>Повторить</button>
               </div>
             </div>
           </div>
-          <p id="upload-error" class="upload-error" role="alert" hidden></p>
+          <p id="upload-error" class="upload-error" role="alert" tabindex="-1" hidden></p>
           <p id="upload-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
-          <div class="upload-footnote" id="preview-note"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><p>Предпросмотр интерфейса. Видео остаётся на вашем устройстве.</p></div>
+          <div class="upload-footnote" id="upload-note"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><p>После выбора видео отправится на сервер, и проверка начнётся автоматически.</p></div>
         </section>
 
         <section class="card result-card" aria-labelledby="result-heading">
-          <div class="card-heading"><h2 id="result-heading">Обзор проверки</h2><svg class="icon muted-icon" aria-hidden="true"><use href="#i-sparkle"/></svg></div>
-          <div class="result-empty">
-            <div class="result-illustration" aria-hidden="true">
-              <div class="result-halo"></div>
-              <div class="result-paper"><span class="paper-mark"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg></span><span class="paper-line line-long"></span><span class="paper-line"></span><span class="paper-line line-short"></span><span class="paper-bottom"><i></i><i></i><i></i></span></div>
-              <span class="result-clock"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg></span><span class="result-spark">✦</span>
-            </div>
-            <h3>Результат будет здесь</h3>
-            <p>После подключения анализа здесь появятся<br class="wide-break"> события, таймкоды и кадры.</p>
-            <span class="waiting-pill"><span></span>Анализ ещё не подключён</span>
+          <div class="card-heading"><h2 id="result-heading">Обзор проверки</h2><span class="result-state" id="result-state">Ожидает видео</span></div>
+          <div class="result-empty" id="result-empty">
+            <div class="result-illustration" aria-hidden="true"><div class="result-halo"></div><div class="result-paper"><span class="paper-fold"></span><span class="paper-line line-short"></span><span class="paper-line"></span><span class="paper-line"></span><span class="paper-line line-short"></span></div><span class="paper-ray ray-one"></span><span class="paper-ray ray-two"></span><span class="paper-ray ray-three"></span></div>
+            <h3>Здесь появится результат</h3>
+            <p>Загрузите видео — мы покажем<br>результат, когда анализ завершится.</p>
+          </div>
+          <div class="result-live" id="result-live" tabindex="-1" hidden>
+            <span class="result-icon-wrap"><svg class="icon" id="result-icon" aria-hidden="true"><use href="#i-clock"/></svg></span>
+            <h3 id="result-title"></h3>
+            <p id="result-description"></p>
+            <p class="result-count" id="result-count" hidden></p>
+            <p class="result-job-id" id="result-job-id"></p>
           </div>
         </section>
       </div>
 
       <section class="guide-section" id="guide" aria-labelledby="guide-heading">
-        <div class="guide-heading"><h2 id="guide-heading">От записи — к понятному результату</h2><span>Три простых шага</span></div>
+        <h2 id="guide-heading" class="sr-only">Как работает проверка</h2>
         <ol class="steps">
-          <li><span class="step-number">01</span><div><h3>Выберите видео</h3><p>Одну запись кассовой операции в MOV.</p></div><svg class="icon step-arrow" aria-hidden="true"><use href="#i-arrow"/></svg></li>
-          <li><span class="step-number">02</span><div><h3>Дождитесь анализа</h3><p>Результат появится автоматически.</p></div><svg class="icon step-arrow" aria-hidden="true"><use href="#i-arrow"/></svg></li>
-          <li><span class="step-number">03</span><div><h3>Проверьте события</h3><p>Изучите моменты, кадры и обоснования.</p></div></li>
+          <li><span class="step-number">01</span><div><h3>Выберите видео</h3><p>Одну запись в формате MOV</p></div></li>
+          <li><span class="step-number">02</span><div><h3>Дождитесь анализа</h3><p>Результат появится автоматически</p></div></li>
+          <li><span class="step-number">03</span><div><h3>Проверьте результат</h3><p>Учитывайте режим работы модели</p></div></li>
         </ol>
-        <p class="guide-note">Так будет работать проверка после подключения сервера.</p>
       </section>
-      <footer class="footer"><span>Forte Audit<span class="footer-dot">·</span>Проект для хакатона</span><span>Кейс ForteBank<svg class="icon" aria-hidden="true"><use href="#i-sparkle"/></svg></span></footer>
+      <footer class="footer"><span>Forte Audit<span>·</span>Кейс ForteBank</span><span>Проект для хакатона</span></footer>
     </main>
   </div>
 
   <dialog id="help-dialog" class="help-dialog" aria-labelledby="help-title" aria-describedby="help-intro">
-    <div class="dialog-heading"><span class="section-icon"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></span><button class="icon-button" id="close-help" type="button" aria-label="Закрыть помощь"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
-    <p class="eyebrow">Небольшая подсказка</p>
+    <div class="dialog-heading"><span class="dialog-help-icon"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></span><button class="icon-button" id="close-help" type="button" aria-label="Закрыть помощь"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
     <h2 id="help-title">Начните с одного видео</h2>
-    <p id="help-intro">Выберите MOV или перетащите его в область загрузки. Файл должен быть непустым и не больше 100 МиБ.</p>
-    <div class="dialog-notice"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><p>Сейчас открыт предпросмотр интерфейса. Можно выбрать и заменить видео, но отправка и анализ пока не подключены.</p></div>
-    <p class="dialog-copy">После подключения сервера проверка начнётся сразу после выбора файла. Результат появится автоматически — дополнительная кнопка «Ответ» не понадобится.</p>
-    <button class="button button-primary dialog-action" id="dialog-upload" type="button">Понятно, к выбору видео<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+    <p id="help-intro">Выберите MOV или перетащите его в область загрузки. Допустимый размер указан под кнопкой. Видео сразу отправится на сервер.</p>
+    <ol class="help-steps"><li>Дождитесь передачи файла и проверки видео.</li><li>Во время анализа можно следить за прошедшим временем.</li><li>Результат появится автоматически. Кнопка «Ответ» не нужна.</li></ol>
+    <div class="dialog-notice"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><p>В тестовом режиме ответы синтетические и не зависят от содержания видео. Режим указан в верхней панели.</p></div>
+    <button class="button button-primary dialog-action" id="dialog-upload" type="button">Понятно, к проверке<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button>
   </dialog>
-  <noscript><p class="noscript-note">Чтобы выбрать видео, включите JavaScript в браузере. Сейчас доступен только просмотр страницы.</p></noscript>
+  <noscript><p class="noscript-note">Для загрузки видео и получения результата включите JavaScript в браузере.</p></noscript>
 </body>
 </html>
