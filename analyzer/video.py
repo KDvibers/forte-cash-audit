@@ -8,6 +8,7 @@ from fractions import Fraction
 from io import BytesIO
 from os import PathLike
 from pathlib import Path
+import math
 from time import perf_counter
 
 import av
@@ -104,7 +105,8 @@ def _duration(stamps: list[_FrameStamp], stream_duration: Fraction | None) -> fl
 
 
 def sample_video(
-    path: str | PathLike[str], max_frames: int = 12, max_side: int = 768
+    path: str | PathLike[str], max_frames: int = 12, max_side: int = 768,
+    *, interval_sec: float | None = None,
 ) -> dict:
     """Return ``duration_sec``, ``frames`` and ``extraction_seconds``.
 
@@ -119,6 +121,11 @@ def sample_video(
     the last distinct PTS interval is an estimate of its duration. JPEG dimensions
     preserve aspect ratio and never exceed ``max_side``; images are not enlarged.
 
+    With ``interval_sec``, choose enough uniform PTS targets for that nominal
+    spacing, capped at ``max_frames``. The returned measured gap, not a claimed
+    fixed FPS, describes actual coverage. Nearest-frame selection can deviate
+    from the requested spacing, especially when the original timestamps have gaps.
+
     ``max_frames`` must be an integer of at least 2, and ``max_side`` a positive
     integer. Missing PTS, empty/non-video files and decode failures raise errors;
     callers must not translate these errors into a ``no_violation`` verdict.
@@ -128,6 +135,11 @@ def sample_video(
         raise ValueError("max_frames must be an integer of at least 2.")
     if isinstance(max_side, bool) or not isinstance(max_side, int) or max_side < 1:
         raise ValueError("max_side must be a positive integer.")
+    if interval_sec is not None and (
+        isinstance(interval_sec, bool) or not isinstance(interval_sec, (int, float))
+        or not math.isfinite(interval_sec) or interval_sec <= 0
+    ):
+        raise ValueError("interval_sec must be a finite positive number.")
     if not isinstance(path, (str, PathLike)) or not str(path).strip():
         raise ValueError("path must identify an existing local video file.")
     video_path = Path(path).expanduser().resolve(strict=True)
@@ -135,7 +147,13 @@ def sample_video(
         raise ValueError("path must identify a file, not a directory.")
 
     stamps, stream_duration = _scan(video_path)
-    selected = _select(stamps, max_frames)
+    target_frames = max_frames
+    capped = False
+    if interval_sec is not None:
+        needed = max(2, math.ceil(float(stamps[-1].timestamp-stamps[0].timestamp)/interval_sec)+1)
+        target_frames = min(max_frames, needed)
+        capped = needed > max_frames
+    selected = _select(stamps, target_frames)
     wanted = {stamp.index: stamp for stamp in selected}
     sampled: dict[int, VideoFrame] = {}
     origin = stamps[0].timestamp
@@ -167,4 +185,9 @@ def sample_video(
         "duration_sec": _duration(stamps, stream_duration),
         "frames": [sampled[stamp.index] for stamp in selected],
         "extraction_seconds": perf_counter() - started,
+        "sampling_capped": capped,
+        "max_sample_gap_sec": max(
+            (float(right.timestamp-left.timestamp) for left, right in zip(selected, selected[1:])),
+            default=0.0,
+        ),
     }
