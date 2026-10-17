@@ -8,6 +8,7 @@
   const remove = el("remove-video");
   const newVideo = el("new-video");
   const retry = el("retry-action");
+  const retryUpload = el("retry-upload");
   const drop = el("drop-zone");
   const progress = el("transfer-progress");
   const connectionRetry = el("connection-retry");
@@ -15,9 +16,13 @@
   const openHelp = el("open-help");
   const resultPanel = el("result-live");
   const report = window.CashAuditResults;
+  const recovery = window.CashAuditRecovery;
+  const initialRecord = recovery?.read() || null;
   let config = null;
   let ready = false;
   let file = null;
+  let sourceFileInfo = null;
+  let jobMode = null;
   let uploadId = null;
   let jobId = null;
   let active = false;
@@ -31,9 +36,49 @@
   let pollDeadline = 0;
   let queryFailures = 0;
   let dialogReturnTarget = openHelp;
+  let allowAbandon = false;
+  let restoreOnConnect = false;
+  let connecting = false;
+  let completedResult = false;
 
   const text = (id, value) => { el(id).textContent = value; };
   const hasFiles = (event) => Array.from(event.dataTransfer?.types || []).includes("Files");
+  const validId = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+  function storageNotice(message) {
+    text("recovery-notice", message);
+    el("recovery-notice").hidden = !message;
+  }
+
+  function persist() {
+    if (!uploadId || !sourceFileInfo) return;
+    const saved = recovery?.write({ version: 1, uploadId, jobId, mode: jobMode, startedAt: beganAt, file: sourceFileInfo });
+    if (!saved) storageNotice("Браузер не сохранил сведения о проверке. Работа продолжается, но после закрытия страницы восстановление может быть недоступно.");
+    else storageNotice("");
+  }
+
+  function forgetSaved() {
+    if (uploadId && recovery && !recovery.clear(uploadId)) {
+      storageNotice("Не удалось удалить сохранённые сведения о проверке в этом браузере.");
+    }
+    restoreOnConnect = false;
+  }
+
+  function showMode() {
+    const mode = uploadId ? jobMode : config?.mode;
+    text("mode-badge", mode === "mock" ? "Тестовый режим" : mode === "real" ? "Анализ видео" : "Режим не определён");
+    el("mode-badge").dataset.mode = mode || "unknown";
+    el("mode-notice").hidden = mode !== "mock";
+    text("mode-notice", "Эта проверка выполнена в тестовом режиме: события и кадры синтетические и не описывают загруженное видео.");
+  }
+
+  function showSelection() {
+    text("file-name", sourceFileInfo?.name || "Исходная запись");
+    text("file-size", sourceFileInfo ? size(sourceFileInfo.size) : "");
+    el("upload-empty").hidden = true;
+    el("upload-selected").hidden = false;
+    drop.dataset.state = "selected";
+  }
 
   function clearDrag() {
     dragDepth = 0;
@@ -65,7 +110,8 @@
     drop.setAttribute("aria-disabled", String(disabled));
     drop.setAttribute("aria-busy", String(active));
     replace.hidden = remove.hidden = true;
-    newVideo.hidden = active || !file;
+    newVideo.hidden = !sourceFileInfo || (active && !allowAbandon);
+    newVideo.textContent = active ? "Начать новую проверку" : "Проверить другое видео";
   }
 
   function result(state, title, description, count = "", icon = "i-clock") {
@@ -94,7 +140,7 @@
   }
 
   function elapsed() {
-    const seconds = Math.max(0, Math.floor((performance.now() - beganAt) / 1000));
+    const seconds = Math.max(0, Math.floor((Date.now() - beganAt) / 1000));
     text("elapsed-time", `С начала загрузки: ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`);
   }
 
@@ -114,13 +160,22 @@
     retryKind = null;
     retry.hidden = true;
     retry.disabled = false;
+    retryUpload.hidden = true;
+    retryUpload.disabled = false;
   }
 
   function reset(focus = true) {
-    if (active) return;
+    if (active && !allowAbandon) return;
     generation += 1;
+    connectionGeneration += 1;
+    connecting = false;
     stopTimers();
+    forgetSaved();
+    active = false;
+    allowAbandon = false;
+    completedResult = false;
     file = uploadId = jobId = null;
+    sourceFileInfo = jobMode = null;
     report?.clear();
     el("open-report").hidden = true;
     input.value = "";
@@ -138,8 +193,10 @@
     clearError();
     clearDrag();
     text("upload-status", "Можно выбрать новое видео. Проверка начнётся автоматически.");
+    showMode();
     controls();
     if (focus) choose.focus();
+    if (!ready) connect();
   }
 
   function uploadError(status, data) {
@@ -179,8 +236,9 @@
   }
 
   async function connect() {
-    if (active) return;
+    if (connecting || (active && !allowAbandon && !restoreOnConnect)) return;
     const attempt = ++connectionGeneration;
+    connecting = true;
     ready = false;
     connectionRetry.disabled = connectionRetry.hidden = true;
     text("connection-message", "Подключаемся к серверу…");
@@ -193,16 +251,23 @@
         if (attempt !== connectionGeneration) return;
         if (!response.ok || !validSession(data)) throw new Error("Unavailable UI API");
         config = data;
-        text("mode-badge", data.mode === "mock" ? "Тестовый режим" : "Анализ видео");
-        el("mode-badge").dataset.mode = data.mode;
-        el("mode-notice").hidden = data.mode !== "mock";
-        text("mode-notice", "Тестовый режим: сервер возвращает синтетический результат. Содержимое вашего видео модель пока не анализирует.");
+        showMode();
         text("max-file-size", `MOV · до ${size(data.max_upload_bytes)}`);
         ready = data.analyzer_ready;
+        if (restoreOnConnect && uploadId) {
+          connecting = false;
+          restoreOnConnect = false;
+          text("connection-message", ready ? "Связь восстановлена. Проверяем последнее задание." : "Анализатор сейчас недоступен. Сохранённый результат можно получить без запуска новой проверки.");
+          connectionRetry.hidden = ready;
+          connectionRetry.disabled = false;
+          restoreUpload();
+          return;
+        }
         if (ready) {
           text("connection-message", "Сервер готов. После выбора видео проверка начнётся автоматически.");
           connectionRetry.hidden = true;
           connectionRetry.disabled = false;
+          connecting = false;
           controls();
           return;
         }
@@ -210,36 +275,51 @@
       } catch {
         if (attempt !== connectionGeneration) return;
         text("connection-message", "Нет связи с сервером. Запустите backend/start.ps1 и откройте приложение по адресу сервера, обычно http://127.0.0.1:8000. Отдельный предпросмотр интерфейса не выполняет анализ.");
+        if (uploadId && !completedResult) {
+          restoreOnConnect = true;
+          allowAbandon = true;
+          result("connection-lost", "Сохранённую проверку пока не удалось восстановить", "Восстановите связь с сервером. Видео повторно отправляться не будет.", "", "i-info");
+          text("selection-note", "Можно дождаться соединения или начать новую проверку. Предыдущее задание при этом не отменяется.");
+          showRetry("connect", "Восстановить связь");
+        }
         break;
       }
       if (performance.now() >= until) break;
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
     } while (attempt === connectionGeneration && performance.now() < until);
     if (attempt !== connectionGeneration) return;
+    connecting = false;
     connectionRetry.hidden = connectionRetry.disabled = false;
     controls();
   }
 
   function pauseUpload(message) {
     stopTimers();
+    active = true;
+    allowAbandon = true;
+    restoreOnConnect = true;
+    connectionRetry.hidden = connectionRetry.disabled = false;
     progress.hidden = true;
     text("transfer-label", "Подтверждение загрузки не получено");
     text("selection-state", "Проверим состояние загрузки");
-    text("selection-note", "Нажмите ниже, чтобы повторно подтвердить загрузку.");
+    text("selection-note", "Сначала проверим, принял ли сервер видео. Новая проверка не отменит прежнюю загрузку, если она ещё обрабатывается.");
     result("connection-lost", "Связь с сервером прервалась", message, "", "i-info");
     text("upload-status", message);
     error(message);
-    showRetry("upload", "Проверить загрузку ещё раз");
+    showRetry("recover", "Проверить состояние загрузки");
     controls();
     retry.focus();
   }
 
   function rejectUpload(status, data) {
-    if (status >= 500 || status === 409 || status === 0) {
+    if (status >= 500 || status === 409 || status === 429 || status === 0) {
       pauseUpload(uploadError(status, data));
       return;
     }
     active = false;
+    allowAbandon = false;
+    forgetSaved();
+    uploadId = null;
     stopTimers();
     progress.hidden = true;
     text("transfer-label", "Загрузка не принята");
@@ -249,7 +329,6 @@
     result("failed", "Проверка не началась", message, "", "i-info");
     text("upload-status", message);
     error(message, true);
-    if (status === 429) showRetry("upload", "Повторить загрузку");
     if (status === 401 || status === 403) {
       ready = false;
       text("connection-message", message);
@@ -258,34 +337,123 @@
     controls();
   }
 
-  function serverModeChanged(mode) {
-    if (!mode || mode === config.mode) return false;
-    generation += 1;
+  function expireRecovery(message) {
     stopTimers();
-    ready = false;
-    active = true;
+    forgetSaved();
+    uploadId = null;
+    active = false;
+    completedResult = false;
+    allowAbandon = false;
+    hideRetry();
     progress.hidden = true;
-    clearError();
-    const message = "Режим работы сервера изменился. Перезагрузите страницу перед новой проверкой, чтобы результат был показан с правильной отметкой режима.";
-    text("mode-badge", "Режим изменился");
-    el("mode-badge").dataset.mode = "unknown";
-    el("mode-notice").hidden = true;
-    text("connection-message", message);
-    text("selection-state", "Проверка приостановлена");
-    text("selection-note", "Перезагрузите страницу, чтобы начать новую проверку.");
-    text("transfer-label", "Режим сервера изменился");
-    result("connection-lost", "Режим сервера изменился", "Не показываем заключение, поскольку режим сервера изменился во время проверки.", "", "i-info");
+    text("selection-state", "Сохранённая проверка недоступна");
+    text("selection-note", "Запись восстановления удалена из браузера. Можно начать новую проверку.");
+    result("connection-lost", "Проверка больше недоступна", message, "", "i-info");
     text("upload-status", message);
-    showRetry("reload", "Перезагрузить страницу");
+    connectionRetry.hidden = connectionRetry.disabled = false;
     controls();
-    retry.focus();
-    return true;
+    newVideo.focus();
+  }
+
+  function unknownMode() {
+    stopTimers();
+    allowAbandon = true;
+    jobMode = null;
+    persist();
+    showMode();
+    hideRetry();
+    text("selection-state", "Режим этой проверки не сохранён");
+    text("selection-note", "Начните новую проверку: нельзя считать старый результат реальным, если его режим неизвестен.");
+    result("connection-lost", "Режим результата неизвестен", "Сервер не сохранил, был ли этот результат тестовым или реальным. Заключение не отображается.", "", "i-info");
+    controls();
+    newVideo.focus();
+  }
+
+  function readJobMode(response) {
+    const value = response.headers.get("X-Cash-Audit-Job-Mode");
+    if (value !== null) jobMode = ["mock", "real"].includes(value) ? value : null;
+    persist();
+    showMode();
+  }
+
+  function startPolling(run) {
+    queryFailures = 0;
+    pollDeadline = performance.now() + (config.job_timeout_seconds + 30) * 1000;
+    active = true;
+    restoreOnConnect = false;
+    allowAbandon = false;
+    startElapsed();
+    progress.hidden = true;
+    text("transfer-label", "Видео уже принято сервером");
+    text("selection-state", "Проверяем сохранённое задание");
+    text("selection-note", file ? "Результат появится автоматически." : "Видео не отправляется повторно. После восстановления результата можно открыть исходный файл локально.");
+    result("processing", "Получаем состояние проверки", "Запрашиваем ранее созданное задание. Повторная загрузка не нужна.");
+    controls();
+    pollJob(run);
+  }
+
+  function restoreUpload(resendOnMissing = false) {
+    if (!uploadId || !config) return;
+    const run = ++generation;
+    stopTimers();
+    active = true;
+    restoreOnConnect = false;
+    hideRetry();
+    clearError();
+    startElapsed();
+    text("selection-state", "Восстанавливаем проверку");
+    result("processing", "Ищем последнее задание", "Проверяем состояние загрузки на сервере. Видео повторно не отправляется.");
+    controls();
+    lookupUpload(run, 0, resendOnMissing);
+  }
+
+  async function lookupUpload(run, failures, resendOnMissing) {
+    if (run !== generation || !uploadId) return;
+    try {
+      const { response, data } = await getJson(`/ui/recovery/${encodeURIComponent(uploadId)}`);
+      if (run !== generation) return;
+      if ([401, 403].includes(response.status)) {
+        ready = false;
+        expireRecovery("Сессия истекла. Результат недоступен в текущем браузере; подключитесь снова для новой проверки.");
+        return;
+      }
+      if (response.status === 404) {
+        if (jobId) {
+          expireRecovery("Сохранённое задание не найдено или срок его хранения истёк.");
+          return;
+        }
+        if (resendOnMissing && file && ready) { upload(); return; }
+        pauseUpload("Задание пока не найдено. Загрузка могла ещё не завершиться. Можно проверить состояние ещё раз; новая проверка не отменяет предыдущую.");
+        retryUpload.hidden = !(file && ready);
+        return;
+      }
+      if (!response.ok || !data || !validId(data.job_id) || !["processing", "done", "failed"].includes(data.status) ||
+          ![null, "mock", "real"].includes(data.mode) || (jobId && data.job_id !== jobId)) throw new Error("Invalid recovery response");
+      jobId = data.job_id;
+      jobMode = data.mode;
+      persist();
+      showMode();
+      startPolling(run);
+    } catch {
+      if (run !== generation) return;
+      if (failures >= 3) {
+        pauseUpload("Не удаётся получить состояние загрузки. Восстановите связь и повторите запрос. Видео не отправлялось повторно.");
+        restoreOnConnect = true;
+        connectionRetry.hidden = connectionRetry.disabled = false;
+        return;
+      }
+      pollTimer = window.setTimeout(() => lookupUpload(run, failures + 1, resendOnMissing), Math.min(10000, 2000 * 2 ** failures));
+    }
   }
 
   function upload() {
     if (!file || !config || !uploadId) return;
     const run = ++generation;
     active = true;
+    completedResult = false;
+    allowAbandon = false;
+    restoreOnConnect = false;
+    persist();
     clearError();
     hideRetry();
     controls();
@@ -295,7 +463,7 @@
     progress.hidden = false;
     text("transfer-label", "Загружаем видео: 0%");
     text("selection-state", "Загружаем видео");
-    text("selection-note", "Оставьте эту страницу открытой до получения результата.");
+    text("selection-note", "После завершения загрузки проверку можно восстановить, даже если закрыть страницу.");
     result("processing", "Передаём видео на сервер", "После загрузки сервер проверит файл и автоматически начнёт анализ.");
     text("upload-status", "Началась загрузка видео.");
     const body = new FormData();
@@ -335,36 +503,35 @@
         rejectUpload(xhr.status, data);
         return;
       }
-      if (serverModeChanged(xhr.getResponseHeader("X-Cash-Audit-Mode"))) return;
-      if (!data || typeof data.job_id !== "string" || !/^[0-9a-f-]{36}$/i.test(data.job_id)) {
+      if (!data || !validId(data.job_id)) {
         pauseUpload("Сервер ответил, но идентификатор задания не получен. Проверьте загрузку ещё раз.");
         return;
       }
       jobId = data.job_id;
-      queryFailures = 0;
-      pollDeadline = performance.now() + (config.job_timeout_seconds + 30) * 1000;
-      progress.hidden = true;
-      text("transfer-label", "Видео загружено");
-      text("selection-state", "Идёт проверка");
-      text("selection-note", "Результат появится автоматически. Дополнительную кнопку нажимать не нужно.");
-      result("processing", "Проверяем кассовые операции", "Видео находится в очереди или уже анализируется. Страница обновит результат автоматически.");
+      const mode = xhr.getResponseHeader("X-Cash-Audit-Job-Mode") || xhr.getResponseHeader("X-Cash-Audit-Mode");
+      jobMode = ["mock", "real"].includes(mode) ? mode : null;
+      persist();
+      showMode();
       text("upload-status", "Видео принято. Ожидаем результат анализа.");
-      pollJob(run);
+      startPolling(run);
     });
     const interrupted = () => {
       if (run !== generation) return;
-      pauseUpload("Не удалось подтвердить загрузку. Сервер мог уже принять видео. Нажмите «Проверить загрузку ещё раз», чтобы продолжить с тем же идентификатором.");
+      pauseUpload("Не удалось подтвердить загрузку. Сервер мог уже принять видео. Сначала проверьте состояние загрузки; повторная отправка автоматически не выполняется.");
     };
     xhr.addEventListener("error", interrupted);
     xhr.addEventListener("timeout", interrupted);
     xhr.addEventListener("abort", interrupted);
-    xhr.send(body);
+    try { xhr.send(body); } catch { interrupted(); }
   }
 
   function pauseQuery(message) {
     stopTimers();
+    allowAbandon = true;
+    restoreOnConnect = true;
+    connectionRetry.hidden = connectionRetry.disabled = false;
     text("selection-state", "Ожидаем подтверждение результата");
-    text("selection-note", "Видео повторно не загружается. Проверим уже созданное задание.");
+    text("selection-note", "Видео повторно не загружается. Новая проверка не отменяет текущее задание.");
     result("connection-lost", "Результат пока недоступен", message, "", "i-info");
     text("upload-status", message);
     showRetry("query", "Проверить результат");
@@ -375,7 +542,7 @@
   function complete(data) {
     if (data.status === "done") {
       try {
-        if (!report?.show(data, { file, mode: config.mode, onNewVideo: () => reset() })) {
+        if (!report?.show(data, { file, mode: jobMode, sourceFileInfo, onNewVideo: () => reset() })) {
           pauseQuery("Не удалось открыть полный результат. Можно повторно запросить это же задание.");
           return;
         }
@@ -386,6 +553,10 @@
       }
     }
     active = false;
+    completedResult = true;
+    allowAbandon = false;
+    restoreOnConnect = false;
+    persist();
     stopTimers();
     elapsed();
     hideRetry();
@@ -397,9 +568,9 @@
       text("upload-status", "Анализ завершился ошибкой. Заключение по видео не сформировано.");
     } else {
       const violation = data.verdict === "violation";
-      const mock = config.mode === "mock";
+      const mock = jobMode === "mock";
       text("selection-state", "Проверка завершена");
-      text("selection-note", "Можно выбрать следующее видео.");
+      text("selection-note", file ? "Можно выбрать следующее видео." : "Результат восстановлен. Для просмотра исходного видео выберите его локально в отчёте.");
       const title = violation ? "Обнаружены признаки возможных нарушений" : "Нарушений не обнаружено";
       result("done", mock ? `Тест: ${title.toLowerCase()}` : title,
         mock ? "Это синтетический результат тестового анализатора, он не описывает содержимое загруженного видео."
@@ -424,18 +595,19 @@
     try {
       const { response, data } = await getJson(`/ui/jobs/${encodeURIComponent(jobId)}`);
       if (run !== generation) return;
-      if (response.ok && serverModeChanged(response.headers.get("X-Cash-Audit-Mode"))) return;
       if ([401, 403, 404].includes(response.status)) {
-        pauseQuery(response.status === 404
-          ? "Задание не найдено в текущей сессии или срок его хранения истёк. Обновите страницу, чтобы начать новую проверку."
-          : "Сессия недействительна. Обновите страницу для новой проверки. Текущий результат получить не удалось.");
-        showRetry("reload", "Начать новую проверку");
+        if (response.status !== 404) ready = false;
+        expireRecovery(response.status === 404
+          ? "Задание не найдено или срок его хранения истёк. Можно начать новую проверку."
+          : "Сессия истекла. Подключитесь снова, чтобы начать новую проверку.");
         return;
       }
       if (!response.ok || !data || data.job_id !== jobId) throw new Error("Invalid job response");
+      readJobMode(response);
       queryFailures = 0;
       if (data.status === "failed") { complete(data); return; }
       if (data.status === "done") {
+        if (!jobMode) { unknownMode(); return; }
         if (!report?.validate(data)) {
           pauseQuery("Сервер вернул неполный результат. Не делаем вывод по видео; можно повторить запрос этого же задания.");
           return;
@@ -470,13 +642,12 @@
     if (!window.crypto?.randomUUID) { error("Для безопасной загрузки откройте приложение через localhost или HTTPS.", true); return; }
     reset(false);
     file = candidate;
+    sourceFileInfo = { name: file.name, size: file.size, lastModified: file.lastModified };
+    jobMode = config.mode;
     uploadId = window.crypto.randomUUID();
-    beganAt = performance.now();
-    text("file-name", file.name);
-    text("file-size", size(file.size));
-    el("upload-empty").hidden = true;
-    el("upload-selected").hidden = false;
-    drop.dataset.state = "selected";
+    beganAt = Date.now();
+    showSelection();
+    showMode();
     upload();
   }
 
@@ -497,15 +668,14 @@
     if (!kind) return;
     hideRetry();
     clearError();
-    if (kind === "reload") window.location.reload();
-    else if (kind === "upload") upload();
-    else {
-      queryFailures = 0;
-      pollDeadline = performance.now() + (config.job_timeout_seconds + 30) * 1000;
-      startElapsed();
-      result("processing", "Запрашиваем результат", "Проверяем ранее созданное задание. Видео повторно не отправляется.");
-      pollJob(generation);
-    }
+    if (kind === "connect") { restoreOnConnect = Boolean(uploadId); connect(); }
+    else if (kind === "recover") restoreUpload();
+    else if (kind === "query") { stopTimers(); startPolling(++generation); }
+  });
+  retryUpload.addEventListener("click", () => {
+    if (!file || !uploadId || retryUpload.hidden || retryUpload.disabled) return;
+    retryUpload.disabled = true;
+    restoreUpload(true);
   });
 
   document.addEventListener("dragover", (event) => { if (hasFiles(event)) event.preventDefault(); });
@@ -540,11 +710,24 @@
   dialog.addEventListener("close", () => {
     if (dialogReturnTarget !== choose) { dialogReturnTarget.focus(); return; }
     if (active) resultPanel.focus();
-    else if (file && ready) newVideo.focus();
+    else if (sourceFileInfo) newVideo.focus();
     else if (ready) choose.focus();
     else openHelp.focus();
   });
 
+  if (initialRecord) {
+    sourceFileInfo = initialRecord.file;
+    uploadId = initialRecord.uploadId;
+    jobId = initialRecord.jobId;
+    jobMode = initialRecord.mode;
+    beganAt = initialRecord.startedAt;
+    active = true;
+    restoreOnConnect = true;
+    showSelection();
+    text("selection-state", "Восстанавливаем последнюю проверку");
+    text("selection-note", "Запросим сохранённое задание. Видео повторно не отправляется.");
+    elapsed();
+  }
   controls();
   connect();
 })();

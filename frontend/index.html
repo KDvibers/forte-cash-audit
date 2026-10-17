@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/assets/styles.css">
   <link rel="stylesheet" href="/assets/results.css">
   <script src="/assets/results.js" defer></script>
+  <script src="/assets/recovery.js" defer></script>
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
@@ -123,12 +124,14 @@
                 <button class="icon-button remove-button" id="remove-video" type="button" aria-label="Убрать выбранное видео" title="Убрать видео" hidden><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg></button>
                 <button class="button button-primary" id="new-video" type="button" hidden>Проверить другое видео</button>
                 <button class="button button-secondary" id="retry-action" type="button" hidden>Повторить</button>
+                <button class="button button-secondary" id="retry-upload" type="button" hidden>Повторно отправить файл</button>
               </div>
             </div>
           </div>
           <p id="upload-error" class="upload-error" role="alert" tabindex="-1" hidden></p>
           <p id="upload-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
           <div class="upload-footnote" id="upload-note"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><p>После выбора видео отправится на сервер, и проверка начнётся автоматически.</p></div>
+          <p id="recovery-notice" class="selection-note" role="status" hidden></p>
         </section>
 
         <section class="card result-card" aria-labelledby="result-heading">

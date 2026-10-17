@@ -63,6 +63,14 @@
 .report-video { display: block; width: 100%; max-height: 420px; aspect-ratio: 16 / 9; border: 1px solid #e7dde2; border-radius: 12px; background: #211920; object-fit: contain; }
 .report-video-feedback { margin-top: 11px; color: #86502c; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
 .report-video-note { margin-top: 9px; color: var(--muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.report-video-host:empty { display: none; }
+.report-source-picker { margin-top: 12px; padding: 16px; border: 1px solid #ecd3df; border-radius: 12px; background: #fff8fb; }
+.report-source-explanation { color: #644d58; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.report-source-button { margin-top: 12px; }
+.report-source-metadata { margin-top: 11px; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.report-source-error { margin-top: 11px; padding: 10px 12px; border: 1px solid #e9c3d0; border-radius: 9px; background: #fff0f4; color: #992248; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.report-source-status { margin-top: 10px; color: #684759; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.report-source-status:empty { display: none; }
 .report-clean-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 185px; margin-top: 24px; padding: 30px 24px; border: 1px solid #dcebe1; border-radius: 15px; background: #f6fbf8; text-align: center; }
 .report-clean-state h3 { margin: 0; color: #276647; font-size: 23px; line-height: 1.35; }
 .report-clean-state p { max-width: 70ch; color: #4e695b; font-size: 14px; line-height: 1.7; }
