@@ -274,7 +274,7 @@
         text("connection-message", typeof data.message === "string" ? data.message : "Анализатор запускается. Выбор видео станет доступен, когда сервер будет готов.");
       } catch {
         if (attempt !== connectionGeneration) return;
-        text("connection-message", "Нет связи с сервером. Запустите backend/start.ps1 и откройте приложение по адресу сервера, обычно http://127.0.0.1:8000. Отдельный предпросмотр интерфейса не выполняет анализ.");
+        text("connection-message", "Не удаётся связаться с сервером. Проверьте подключение к интернету и нажмите «Подключиться снова». Если ошибка повторяется, сообщите команде, которая предоставила ссылку.");
         if (uploadId && !completedResult) {
           restoreOnConnect = true;
           allowAbandon = true;
