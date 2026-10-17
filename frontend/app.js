@@ -193,6 +193,7 @@
     clearError();
     clearDrag();
     text("upload-status", "Можно выбрать новое видео. Проверка начнётся автоматически.");
+    if (ready) text("connection-message", "Выберите видео, чтобы начать новую проверку.");
     showMode();
     controls();
     if (focus) choose.focus();
@@ -299,11 +300,12 @@
     allowAbandon = true;
     restoreOnConnect = true;
     connectionRetry.hidden = connectionRetry.disabled = false;
+    text("connection-message", message);
     progress.hidden = true;
     text("transfer-label", "Подтверждение загрузки не получено");
     text("selection-state", "Проверим состояние загрузки");
     text("selection-note", "Сначала проверим, принял ли сервер видео. Новая проверка не отменит прежнюю загрузку, если она ещё обрабатывается.");
-    result("connection-lost", "Связь с сервером прервалась", message, "", "i-info");
+    result("connection-lost", "Загрузка требует подтверждения", message, "", "i-info");
     text("upload-status", message);
     error(message);
     showRetry("recover", "Проверить состояние загрузки");
@@ -324,6 +326,7 @@
     progress.hidden = true;
     text("transfer-label", "Загрузка не принята");
     const message = uploadError(status, data);
+    text("connection-message", message);
     text("selection-state", "Видео не принято");
     text("selection-note", "Исправьте причину ошибки или выберите другое видео.");
     result("failed", "Проверка не началась", message, "", "i-info");
@@ -345,6 +348,7 @@
     completedResult = false;
     allowAbandon = false;
     hideRetry();
+    text("connection-message", message);
     progress.hidden = true;
     text("selection-state", "Сохранённая проверка недоступна");
     text("selection-note", "Запись восстановления удалена из браузера. Можно начать новую проверку.");
@@ -382,6 +386,7 @@
     active = true;
     restoreOnConnect = false;
     allowAbandon = false;
+    text("connection-message", "Запрашиваем состояние проверки. Видео повторно не отправляется.");
     startElapsed();
     progress.hidden = true;
     text("transfer-label", "Видео уже принято сервером");
@@ -400,6 +405,7 @@
     restoreOnConnect = false;
     hideRetry();
     clearError();
+    text("connection-message", "Проверяем, принял ли сервер загрузку. Видео повторно не отправляется.");
     startElapsed();
     text("selection-state", "Восстанавливаем проверку");
     result("processing", "Ищем последнее задание", "Проверяем состояние загрузки на сервере. Видео повторно не отправляется.");
@@ -436,6 +442,7 @@
       startPolling(run);
     } catch {
       if (run !== generation) return;
+      text("connection-message", "Не удаётся получить состояние загрузки. Повторяем запрос; видео заново не отправляется.");
       if (failures >= 3) {
         pauseUpload("Не удаётся получить состояние загрузки. Восстановите связь и повторите запрос. Видео не отправлялось повторно.");
         restoreOnConnect = true;
@@ -455,6 +462,7 @@
     restoreOnConnect = false;
     persist();
     clearError();
+    text("connection-message", "Передаём видео на сервер. Дождитесь подтверждения загрузки.");
     hideRetry();
     controls();
     startElapsed();
@@ -530,6 +538,7 @@
     allowAbandon = true;
     restoreOnConnect = true;
     connectionRetry.hidden = connectionRetry.disabled = false;
+    text("connection-message", message);
     text("selection-state", "Ожидаем подтверждение результата");
     text("selection-note", "Видео повторно не загружается. Новая проверка не отменяет текущее задание.");
     result("connection-lost", "Результат пока недоступен", message, "", "i-info");
@@ -603,6 +612,9 @@
         return;
       }
       if (!response.ok || !data || data.job_id !== jobId) throw new Error("Invalid job response");
+      text("connection-message", "Сервер отвечает. Состояние проверки обновлено.");
+      connectionRetry.hidden = ready;
+      connectionRetry.disabled = false;
       readJobMode(response);
       queryFailures = 0;
       if (data.status === "failed") { complete(data); return; }
@@ -621,12 +633,13 @@
       pollTimer = window.setTimeout(() => pollJob(run), Math.max(1000, Math.min(10000, interval)));
     } catch {
       if (run !== generation) return;
+      text("connection-message", "Не удаётся получить состояние задания. Повторяем запрос; видео заново не отправляется.");
       queryFailures += 1;
       if (queryFailures >= 4 || performance.now() >= pollDeadline) {
-        pauseQuery("Не удаётся связаться с сервером. Видео уже принято; повторно отправлять его не нужно. Восстановите соединение и нажмите «Проверить результат».");
+        pauseQuery("Не удалось получить состояние задания. Видео уже принято; повторно отправлять его не нужно. Проверьте соединение и нажмите «Проверить результат».");
         return;
       }
-      result("processing", "Восстанавливаем связь", "Видео уже на сервере. Повторяем только запрос состояния задания.");
+      result("processing", "Повторяем запрос состояния", "Видео уже на сервере. Повторяем только запрос состояния задания.");
       pollTimer = window.setTimeout(() => pollJob(run), Math.min(10000, 2000 * 2 ** (queryFailures - 1)));
     }
   }
