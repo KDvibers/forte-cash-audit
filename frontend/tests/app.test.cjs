@@ -442,3 +442,152 @@ test("starting a new check after an unavailable worker reconnects and enables fi
   assert.equal(page.storage.has(KEY), false);
   assert.equal(page.posts.length, 0);
 });
+
+test("choosing MOV starts one automatic upload and ignores a second selection while it is active", async () => {
+  const page = makeHarness({ record: null });
+  await page.settle();
+  const input = page.get("video-input");
+  const file = { name: "neutral.mov", size: 12345, lastModified: EPOCH - 1000 };
+  input.files = [file];
+  input.emit("change");
+  await page.settle();
+  assert.equal(page.posts.length, 1, "Choosing the file must start the upload without another button");
+  assert.equal(page.posts[0].method, "POST");
+  assert.equal(page.posts[0].url, "/ui/analyze");
+  assert.equal(page.posts[0].headers["X-CSRF-Token"], bootstrap().csrf_token);
+  assert.equal(page.posts[0].headers["X-API-Key"], undefined, "The shared API key does not belong in the browser");
+  assert.equal(page.get("choose-video").disabled, true);
+  assert.equal(page.get("drop-zone").getAttribute("aria-busy"), "true");
+
+  input.files = [{ ...file, name: "second.mov" }];
+  input.emit("change");
+  await page.settle();
+  assert.equal(page.posts.length, 1);
+  page.posts[0].respond(200, { job_id: JOB }, { "X-Cash-Audit-Job-Mode": "mock" });
+  await page.settle();
+  assert.equal(page.shown.length, 1);
+  assert.equal(page.shown[0].options.file, file, "The result must retain the file actually submitted");
+  assert.equal(page.get("result-live").dataset.state, "done");
+  assert.equal(page.get("new-video").hidden, false);
+});
+
+for (const [label, files, message] of [
+  ["non-MOV", [{ name: "neutral.mp4", size: 12345 }], /формате MOV/],
+  ["empty", [{ name: "empty.mov", size: 0 }], /пустой/],
+  ["oversized", [{ name: "large.mov", size: 100 * 1024 * 1024 + 1 }], /меньшего размера/],
+  ["multiple", [{ name: "one.mov", size: 1 }, { name: "two.mov", size: 1 }], /одно видео/],
+]) {
+  test(`${label} selection explains the problem before any upload and allows a valid file next`, async () => {
+    const page = makeHarness({ record: null });
+    await page.settle();
+    const input = page.get("video-input");
+    input.files = files;
+    input.emit("change");
+    await page.settle();
+    assert.equal(page.posts.length, 0);
+    assert.equal(page.storage.has(KEY), false);
+    assert.equal(page.get("upload-error").hidden, false);
+    assert.match(page.get("upload-error").textContent, message);
+    assert.equal(page.get("choose-video").disabled, false);
+
+    input.files = [{ name: "neutral.mov", size: 12345, lastModified: EPOCH - 1000 }];
+    input.emit("change");
+    await page.settle();
+    assert.equal(page.posts.length, 1);
+    assert.equal(page.get("upload-error").hidden, true);
+  });
+}
+
+test("a rejected damaged MOV shows the server explanation and permits a new check", async () => {
+  const page = makeHarness({ record: null });
+  await page.settle();
+  const input = page.get("video-input");
+  input.files = [{ name: "damaged.mov", size: 12345, lastModified: EPOCH - 1000 }];
+  input.emit("change");
+  await page.settle();
+  page.posts[0].respond(422, { detail: "Не удалось прочитать видео. Выберите корректный MOV с видеодорожкой." });
+  await page.settle();
+  assert.equal(page.shown.length, 0);
+  assert.equal(page.storage.has(KEY), false, "A rejected file must not be restored as an accepted job");
+  assert.equal(page.get("result-live").dataset.state, "failed");
+  assert.match(page.get("upload-error").textContent, /корректный MOV с видеодорожкой/);
+  assert.equal(page.get("new-video").hidden, false);
+
+  page.get("new-video").click();
+  await page.settle();
+  assert.equal(page.get("upload-empty").hidden, false);
+  assert.equal(page.get("choose-video").disabled, false);
+  input.files = [{ name: "neutral.mov", size: 54321, lastModified: EPOCH }];
+  input.emit("change");
+  await page.settle();
+  assert.equal(page.posts.length, 2);
+  page.posts[1].respond(200, { job_id: JOB }, { "X-Cash-Audit-Job-Mode": "mock" });
+  await page.settle();
+  assert.equal(page.shown.length, 1);
+  assert.equal(page.shown[0].options.file.name, "neutral.mov");
+});
+
+test("an incomplete completed response never becomes a verdict and can be retrieved again without uploading", async () => {
+  let malformed = true;
+  const page = makeHarness({ route(url) {
+    if (url === `/ui/jobs/${JOB}`) return response(malformed
+      ? { job_id: JOB, status: "done", verdict: "violation", violations: [] }
+      : completed(), 200, { "X-Cash-Audit-Job-Mode": "mock" });
+  } });
+  await page.settle();
+  assert.equal(page.shown.length, 0);
+  assert.equal(page.get("result-live").dataset.state, "connection-lost");
+  assert.equal(page.get("result-live").dataset.verdict, undefined);
+  assert.match(page.get("result-description").textContent, /неполный результат/);
+  const attempts = page.jobRequests().length;
+  await page.advance(30_000);
+  assert.equal(page.jobRequests().length, attempts, "A malformed final result must not trigger an endless polling loop");
+  malformed = false;
+  page.get("retry-action").click();
+  await page.settle();
+  assert.equal(page.shown.length, 1);
+  assert.equal(page.posts.length, 0);
+  assert.ok(page.jobRequests().every((entry) => entry.url === `/ui/jobs/${JOB}`));
+});
+
+test("exceeding the UI wait limit pauses without a verdict and resumes only the existing job", async () => {
+  let done = false;
+  const page = makeHarness({ session: bootstrap({ job_timeout_seconds: 1 }), route(url) {
+    if (url === `/ui/jobs/${JOB}`) return response(done ? completed() : processing(), 200,
+      { "X-Cash-Audit-Job-Mode": "mock" });
+  } });
+  await page.settle();
+  await page.advance(35_000);
+  assert.equal(page.shown.length, 0);
+  assert.equal(page.get("result-live").dataset.state, "connection-lost");
+  assert.equal(page.get("result-live").dataset.verdict, undefined);
+  assert.match(page.get("result-description").textContent, /Время ожидания/);
+  const attempts = page.jobRequests().length;
+  await page.advance(30_000);
+  assert.equal(page.jobRequests().length, attempts);
+  done = true;
+  page.get("retry-action").click();
+  await page.settle();
+  assert.equal(page.shown.length, 1);
+  assert.equal(page.posts.length, 0);
+  assert.equal(page.maxPendingGets(), 1);
+  assert.ok(page.jobRequests().every((entry) => entry.url === `/ui/jobs/${JOB}`));
+});
+
+test("an unavailable server gives a visitor an actionable retry without redirecting them to localhost", async () => {
+  let online = false;
+  const page = makeHarness({ record: null, route(url) {
+    if (url === "/ui/session" && !online) throw new Error("Offline");
+  } });
+  await page.settle();
+  assert.equal(page.get("choose-video").disabled, true);
+  assert.equal(page.get("connection-retry").hidden, false);
+  assert.match(page.get("connection-message").textContent, /Подключиться снова/);
+  assert.doesNotMatch(page.get("connection-message").textContent, /127\.0\.0\.1|localhost|backend\/start\.ps1/);
+  online = true;
+  page.get("connection-retry").click();
+  await page.settle();
+  assert.equal(page.get("choose-video").disabled, false);
+  assert.equal(page.get("connection-retry").hidden, true);
+  assert.equal(page.posts.length, 0);
+});
