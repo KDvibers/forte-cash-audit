@@ -200,6 +200,7 @@ test("stored result remains available while the current analyzer is unavailable"
   assert.equal(page.shown.length, 1);
   assert.equal(page.posts.length, 0);
   assert.equal(page.get("choose-video").disabled, true);
+  assert.equal(page.get("connection-retry").hidden, false, "Unavailable analyzer must still allow a readiness retry");
 });
 
 test("an interrupted upload with no job ID is recovered by upload ID without POST", async () => {
@@ -216,16 +217,21 @@ test("network failures stop automatic polling and manual resume requests the exi
     if (url === `/ui/jobs/${JOB}` && offline) throw new Error("Offline");
   } });
   await page.settle();
+  assert.match(page.get("connection-message").textContent, /Не удаётся получить состояние задания/);
+  assert.doesNotMatch(page.get("connection-message").textContent, /Сервер готов|Сервер отвечает/);
   await page.advance(30_000);
   const attempts = page.jobRequests().length;
   assert.ok(attempts >= 1 && attempts <= 5, "GET retries must be bounded");
   assert.equal(page.get("retry-action").hidden, false);
+  assert.equal(page.get("connection-message").textContent, page.get("result-description").textContent);
   await page.advance(30_000);
   assert.equal(page.jobRequests().length, attempts);
   offline = false;
   page.get("retry-action").click();
   await page.settle();
   assert.equal(page.shown.length, 1);
+  assert.match(page.get("connection-message").textContent, /Сервер отвечает/);
+  assert.equal(page.get("connection-retry").hidden, true);
   assert.equal(page.posts.length, 0);
   assert.equal(page.maxPendingGets(), 1);
 });
@@ -378,6 +384,8 @@ for (const status of [429, 503]) {
     page.posts[0].respond(status, { detail: "Server busy" });
     await page.settle();
     assert.equal(page.get("result-live").dataset.state, "connection-lost");
+    assert.equal(page.get("connection-message").textContent, "Server busy");
+    assert.doesNotMatch(page.get("result-title").textContent, /Связь.*прервалась/);
     assert.equal(page.get("retry-action").hidden, false);
     assert.equal(page.get("retry-upload").hidden, true);
     assert.equal(page.posts.length, 1);
@@ -387,6 +395,8 @@ for (const status of [429, 503]) {
     assert.equal(lookups, 1);
     assert.equal(page.posts.length, 1, "A missing lookup is not permission for an automatic POST");
     assert.equal(page.get("retry-upload").hidden, false);
+    assert.match(page.get("connection-message").textContent, /Задание пока не найдено/);
+    assert.doesNotMatch(page.get("connection-message").textContent, /Нет связи|Связь.*прервалась/);
 
     page.get("retry-upload").click();
     page.get("retry-upload").click();
@@ -511,12 +521,15 @@ test("a rejected damaged MOV shows the server explanation and permits a new chec
   assert.equal(page.storage.has(KEY), false, "A rejected file must not be restored as an accepted job");
   assert.equal(page.get("result-live").dataset.state, "failed");
   assert.match(page.get("upload-error").textContent, /корректный MOV с видеодорожкой/);
+  assert.equal(page.get("connection-message").textContent, page.get("upload-error").textContent);
   assert.equal(page.get("new-video").hidden, false);
 
   page.get("new-video").click();
   await page.settle();
   assert.equal(page.get("upload-empty").hidden, false);
   assert.equal(page.get("choose-video").disabled, false);
+  assert.match(page.get("connection-message").textContent, /Выберите видео/);
+  assert.doesNotMatch(page.get("connection-message").textContent, /Не удалось прочитать/);
   input.files = [{ name: "neutral.mov", size: 54321, lastModified: EPOCH }];
   input.emit("change");
   await page.settle();
@@ -539,6 +552,7 @@ test("an incomplete completed response never becomes a verdict and can be retrie
   assert.equal(page.get("result-live").dataset.state, "connection-lost");
   assert.equal(page.get("result-live").dataset.verdict, undefined);
   assert.match(page.get("result-description").textContent, /неполный результат/);
+  assert.equal(page.get("connection-message").textContent, page.get("result-description").textContent);
   const attempts = page.jobRequests().length;
   await page.advance(30_000);
   assert.equal(page.jobRequests().length, attempts, "A malformed final result must not trigger an endless polling loop");
@@ -546,6 +560,7 @@ test("an incomplete completed response never becomes a verdict and can be retrie
   page.get("retry-action").click();
   await page.settle();
   assert.equal(page.shown.length, 1);
+  assert.match(page.get("connection-message").textContent, /Сервер отвечает/);
   assert.equal(page.posts.length, 0);
   assert.ok(page.jobRequests().every((entry) => entry.url === `/ui/jobs/${JOB}`));
 });
@@ -590,4 +605,27 @@ test("an unavailable server gives a visitor an actionable retry without redirect
   assert.equal(page.get("choose-video").disabled, false);
   assert.equal(page.get("connection-retry").hidden, true);
   assert.equal(page.posts.length, 0);
+});
+
+test("failed upload recovery updates the connection banner and successful GET recovery clears the stale error", async () => {
+  let offline = true;
+  const page = makeHarness({ record: saved({ jobId: null }), route(url) {
+    if (url === `/ui/recovery/${UPLOAD}` && offline) throw new Error("Offline");
+  } });
+  await page.settle();
+  assert.match(page.get("connection-message").textContent, /Не удаётся получить состояние загрузки/);
+  assert.doesNotMatch(page.get("connection-message").textContent, /Сервер готов|Связь восстановлена/);
+  await page.advance(30_000);
+  assert.equal(page.get("result-live").dataset.state, "connection-lost");
+  assert.equal(page.get("connection-message").textContent, page.get("result-description").textContent);
+  assert.equal(page.get("retry-action").hidden, false);
+
+  offline = false;
+  page.get("retry-action").click();
+  await page.settle();
+  assert.equal(page.shown.length, 1);
+  assert.match(page.get("connection-message").textContent, /Сервер отвечает/);
+  assert.doesNotMatch(page.get("connection-message").textContent, /Не удаётся|Не удалось/);
+  assert.equal(page.get("connection-retry").hidden, true);
+  assert.equal(page.posts.length, 0, "Recovery must query the original upload without resending video");
 });
