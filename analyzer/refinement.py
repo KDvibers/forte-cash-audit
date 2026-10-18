@@ -149,11 +149,22 @@ def refinement_indices(frames, observations, max_new_frames=24):
     counts unique eligible frames before the cap, not the number of windows.
     This plans observations only; it does not infer an action or violation.
     """
+    return _select_refinement_indices(
+        frames, observations, max_new_frames,
+        lambda left, right: 0 if _suspicious(left, right) else None)
+
+
+def _select_refinement_indices(frames, observations, max_new_frames, window_priority,
+                               *, include_selection_order=False):
+    """Share actual-PTS window construction and bounded fair selection."""
     limit = _integer(max_new_frames, "max_new_frames", 0)
     times = _times(frames)
     rows = _observations(observations)
     if not times or len(rows) < 2:
-        return {"indices": [], "candidate_count": 0, "capped": False}
+        result = {"indices": [], "candidate_count": 0, "capped": False}
+        if include_selection_order:
+            result["selection_order"] = []
+        return result
     unique_indices = set(_unique_indices(times))
     observed_times = [row[0] for row in rows]
     already_seen = set()
@@ -162,10 +173,13 @@ def refinement_indices(frames, observations, max_new_frames=24):
         if any(abs(observed_times[position] - timestamp) <= _EPSILON_SEC
                for position in (right - 1, right) if 0 <= position < len(observed_times)):
             already_seen.add(index)
-    windows = []
+    windows_by_priority = {}
     all_candidates = set()
     for left, right in zip(rows, rows[1:]):
-        if right[0] - left[0] > _MAX_WINDOW_GAP_SEC or not _suspicious(left, right):
+        if right[0] - left[0] > _MAX_WINDOW_GAP_SEC:
+            continue
+        priority = window_priority(left, right)
+        if priority is None:
             continue
         start = max(0.0, left[0] - _PADDING_SEC)
         end = min(times[-1], right[0] + _PADDING_SEC)
@@ -177,20 +191,65 @@ def refinement_indices(frames, observations, max_new_frames=24):
             continue
         centre = left[0] + (right[0] - left[0]) / 2
         candidates.sort(key=lambda index: (abs(times[index] - centre), times[index], index))
-        windows.append(deque(candidates))
+        windows_by_priority.setdefault(priority, []).append(deque(candidates))
         all_candidates.update(candidates)
-    selected = set()
-    while len(selected) < limit:
-        progressed = False
-        for candidates in windows:
-            while candidates and candidates[0] in selected:
-                candidates.popleft()
-            if candidates:
-                selected.add(candidates.popleft())
-                progressed = True
-                if len(selected) >= limit:
-                    break
-        if not progressed:
-            break
-    return {"indices": sorted(selected), "candidate_count": len(all_candidates),
-            "capped": len(all_candidates) > limit}
+    selected, selection_order = set(), []
+    for priority in sorted(windows_by_priority):
+        while len(selected) < limit:
+            progressed = False
+            for candidates in windows_by_priority[priority]:
+                while candidates and candidates[0] in selected:
+                    candidates.popleft()
+                if candidates:
+                    index = candidates.popleft()
+                    selected.add(index)
+                    selection_order.append(index)
+                    progressed = True
+                    if len(selected) >= limit:
+                        break
+            if not progressed:
+                break
+    result = {"indices": sorted(selected), "candidate_count": len(all_candidates),
+              "capped": len(all_candidates) > limit}
+    if include_selection_order:
+        result["selection_order"] = selection_order
+    return result
+
+
+def _cash_absence_condition(row):
+    _, states, blocked = row
+    person = None if "person_in_work_area" in blocked else states.get("person_in_work_area")
+    cash = None if "cash_on_worktop" in blocked else states.get("cash_on_worktop")
+    if person == "yes" or cash == "no":
+        return "false"
+    if person == "no" and cash == "yes":
+        return "true"
+    return "unknown"
+
+
+def _rule_window_priority(left, right):
+    before, after = _cash_absence_condition(left), _cash_absence_condition(right)
+    if before == after:
+        return None
+    return 1 if "unknown" in (before, after) else 0
+
+
+def rule_refinement_indices(frames, observations, max_new_frames=8):
+    """Refine only the sampled absence-AND-worktop-cash condition.
+
+    Known true/false boundaries have priority over known/unknown boundaries.
+    Windows of each priority share the cap in chronological round-robin order,
+    nearest their centres first. A known person=yes or cash=no makes the
+    conjunction false even if its other operand was deliberately not checked.
+    Equal false, true or unknown endpoints do not trigger refinement; short
+    actions between equal endpoints can still be missed.
+
+    Feature-scoped errors block their operand; an unknown error scope blocks
+    both. A blocked value is never used as a known boundary. Nearby new frames
+    may be selected at the secondary unknown/known priority; failed observed
+    frames themselves are never selected again. No gap over four seconds is
+    bridged. Source indices and actual timestamps are retained, without reading
+    images, inferring a violation or changing any input observations.
+    """
+    return _select_refinement_indices(frames, observations, max_new_frames, _rule_window_priority,
+                                      include_selection_order=True)

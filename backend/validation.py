@@ -8,6 +8,7 @@ import math
 import shutil
 import struct
 import subprocess
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -17,12 +18,25 @@ class InvalidVideo(ValueError):
     pass
 
 
-def validate_video(path: Path, ffprobe_path: str | None = None) -> dict:
+class VideoValidationTimeout(TimeoutError):
+    pass
+
+
+def validate_video(path: Path, ffprobe_path: str | None = None, *, deadline_monotonic: float | None = None) -> dict:
     """Check a local MOV container and decode an actual frame with a bounded runtime.
 
     The analyzer must still handle errors later in the stream. This check cannot
     establish that every frame of the input is intact.
     """
+    def remaining(limit):
+        if deadline_monotonic is None:
+            return limit
+        seconds = deadline_monotonic - time.monotonic()
+        if seconds <= 0:
+            raise VideoValidationTimeout
+        return min(limit, seconds)
+
+    remaining(10)
     total = path.stat().st_size
     with path.open("rb") as stream:
         header = stream.read(min(total, 1024 * 1024))
@@ -56,9 +70,11 @@ def validate_video(path: Path, ffprobe_path: str | None = None) -> dict:
         try:
             run = subprocess.run([probe, "-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries",
                                   "format=duration:stream=codec_type,codec_name", "-of", "json", str(path)],
-                                 capture_output=True, timeout=10, check=False)
+                                 capture_output=True, timeout=remaining(10), check=False)
+            remaining(10)
             info = json.loads(run.stdout)
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+            remaining(10)
             raise InvalidVideo("Не удалось прочитать видео. Проверьте файл и повторите загрузку.") from exc
         if run.returncode or not any(stream.get("codec_type") == "video" for stream in info.get("streams", [])):
             raise InvalidVideo("В файле не найден читаемый видеопоток.")
@@ -70,8 +86,10 @@ def validate_video(path: Path, ffprobe_path: str | None = None) -> dict:
             [imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-xerror", "-nostdin", "-threads", "1",
              "-protocol_whitelist", "file,pipe", "-i", str(path), "-map", "0:v:0", "-frames:v", "1",
              "-vf", "scale=320:-2", "-threads", "1", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"],
-            capture_output=True, timeout=20, check=False)
+            capture_output=True, timeout=remaining(20), check=False)
+        remaining(20)
     except (OSError, subprocess.TimeoutExpired, ImportError, RuntimeError) as exc:
+        remaining(20)
         raise InvalidVideo("Проверка видео недоступна: проверьте установку FFmpeg на сервере.") from exc
     if decode.returncode != 0 or not decode.stdout.startswith(b"\xff\xd8"):
         raise InvalidVideo("Видео повреждено или не содержит читаемых кадров.")

@@ -51,8 +51,10 @@ ACTION_SUPPORT = {
 }
 
 
-def action_policy_fingerprint():
-    return hashlib.sha256(json.dumps({
+def action_policy_fingerprint(*, exhaustive_contact=False):
+    if type(exhaustive_contact) is not bool:
+        raise ValueError("exhaustive_contact must be boolean")
+    policy = {
         "revision": 4, "prompts": [MACHINE_PROMPT, INTERACTION_PROMPT, HAND_PROMPT, CABINET_ACTION_PROMPT, CABINET_PROMPT],
         "schemas": [BOX_SCHEMA, INTERACTION_SCHEMA, HAND_SCHEMA, CABINET_ACTION_SCHEMA],
         "crop_padding": {"cabinet": 0.7, "desk": 0.4},
@@ -60,7 +62,12 @@ def action_policy_fingerprint():
         "counter_geometry": "optional_cluster_from_three_identity_checked_coarse_frames",
         "contact_policy": "sequence_yes_requires_hand_in_any_anchor_check_middle_then_edges",
         "deadline_policy": "response_must_arrive_strictly_before_deadline",
-    }, sort_keys=True).encode()).hexdigest()
+    }
+    if exhaustive_contact:
+        policy.update(revision=5, exhaustive_contact=True,
+            contact_policy="unconfirmed_middle_checks_both_edges_then_disagreement_pair_recheck",
+            contact_evidence_kind="model_estimate_not_verified_onset")
+    return hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
 
 
 class ActionObserver:
@@ -68,7 +75,10 @@ class ActionObserver:
         self.grounding_client = grounding_client
         self.activity_client = activity_client
 
-    def check(self, frames, *, region, window_id, deadline=None, counter_box=None):
+    def check(self, frames, *, region, window_id, deadline=None, counter_box=None,
+              exhaustive_contact=False):
+        if type(exhaustive_contact) is not bool:
+            raise ValueError("exhaustive_contact must be boolean")
         if region not in ("cabinet", "desk"):
             raise ValueError("Unknown action region")
         if (len(frames) != 3
@@ -83,8 +93,10 @@ class ActionObserver:
             "result": {"interaction": "uncertain", "cash_near_cabinet": "uncertain",
                        "cash_into_cabinet": "uncertain", "counter_direction": "uncertain"},
             "status": "ok", "calls": [], "errors": [], "feature_support": ACTION_SUPPORT,
-            "policy_sha256": action_policy_fingerprint(),
+            "policy_sha256": action_policy_fingerprint(exhaustive_contact=exhaustive_contact),
         }
+        if exhaustive_contact:
+            record["contact_evidence_kind"] = "model_estimate_not_verified_onset"
 
         def ask(client, question, images, prompt, schema, sequence=False):
             remaining = client.timeout if deadline is None else deadline-time.perf_counter()
@@ -138,7 +150,18 @@ class ActionObserver:
                 # Top vs front failed validation. Only contact vs away is used.
                 contact = "yes" if hand in ("top", "front") else "no" if hand == "away" else "uncertain"
                 record["contact_checks"] = [{"timestamp_sec": crops[1].timestamp_sec, "hand_position": hand}]
-                if interaction == "yes" and contact != "yes":
+                if exhaustive_contact and contact != "yes":
+                    # A negative sparse sequence and an absent middle hand can
+                    # both miss a brief touch at either edge. Inspect both; an
+                    # error leaves the whole result uncertain, not negative.
+                    for edge in (0, 2):
+                        edge_hand = read_enum(ask(self.activity_client, "counter_hand_edge", crops[edge], HAND_PROMPT, HAND_SCHEMA),
+                                              "hand_position", HAND_SCHEMA["properties"]["hand_position"]["enum"])
+                        record["contact_checks"].append({"timestamp_sec": crops[edge].timestamp_sec, "hand_position": edge_hand})
+                    positions = [item["hand_position"] for item in record["contact_checks"]]
+                    contact = ("yes" if any(value in ("top", "front") for value in positions) else
+                               "no" if all(value == "away" for value in positions) else "uncertain")
+                elif interaction == "yes" and contact != "yes":
                     # Interaction may occur at either edge of the window. A
                     # later withdrawn hand cannot erase an earlier visible touch.
                     for edge in (0, 2):
@@ -148,7 +171,23 @@ class ActionObserver:
                         if edge_hand in ("top", "front"):
                             contact = "yes"
                             break
-                if interaction == contact:
+                if exhaustive_contact and contact == "yes" and interaction != "yes":
+                    # This is a fresh chronological query around the first
+                    # positive contact estimate, not OR-ing contradictory votes.
+                    positive = next(item for item in record["contact_checks"]
+                                    if item["hand_position"] in ("top", "front"))
+                    anchor_index = next(i for i, crop in enumerate(crops)
+                                        if crop.timestamp_sec == positive["timestamp_sec"])
+                    pair_indices = (1, 2) if anchor_index == 2 else (0, 1)
+                    record["contact_recheck"] = {"initial_interaction": interaction,
+                        "frame_timestamps": [crops[i].timestamp_sec for i in pair_indices]}
+                    rechecked = read_enum(ask(self.activity_client, "counter_sequence_contact_recheck",
+                        [crops[i] for i in pair_indices], INTERACTION_PROMPT, INTERACTION_SCHEMA, True),
+                        "interaction", YN)
+                    record["contact_recheck"]["interaction"] = rechecked
+                    if rechecked == "yes":
+                        record["result"]["interaction"] = "yes"
+                elif interaction == contact:
                     record["result"]["interaction"] = interaction
                 record["contact_evidence_sec"] = [r["timestamp_sec"] for r in record["contact_checks"]
                                                     if r["hand_position"] in ("top", "front")]

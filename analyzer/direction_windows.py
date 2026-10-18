@@ -155,14 +155,23 @@ def _chunks(episode, times):
     return chunks, empty_splits_skipped
 
 
-def _anchors(chunk, times):
+def _anchors(chunk, times, *, reserve_context=False):
     start, end = chunk["start"], chunk["end"]
     inside = [i for i, t in enumerate(times) if start-_EPS <= t <= end+_EPS]
     if not inside:
         return None
-    count = min(_MAX_FRAMES, len(inside))
-    targets = [start+j*(end-start)/(count-1) for j in range(count)] if count > 1 else [start]
-    selected = {min(inside, key=lambda i: (abs(times[i]-target), times[i], i)) for target in targets}
+    if reserve_context:
+        # Keep the actual interior endpoints and at most one middle frame.
+        # The two remaining slots are for context, even at a video boundary;
+        # missing context must not silently become more interior observations.
+        selected = {inside[0], inside[-1]}
+        if len(inside) > 2:
+            midpoint = start + (end-start)/2
+            selected.add(min(inside[1:-1], key=lambda i: (abs(times[i]-midpoint), times[i], i)))
+    else:
+        count = min(_MAX_FRAMES, len(inside))
+        targets = [start+j*(end-start)/(count-1) for j in range(count)] if count > 1 else [start]
+        selected = {min(inside, key=lambda i: (abs(times[i]-target), times[i], i)) for target in targets}
     before = [i for i, t in enumerate(times) if start-_CONTEXT-_EPS <= t < start-_EPS]
     after = [i for i, t in enumerate(times) if end+_EPS < t <= end+_CONTEXT+_EPS]
     added, context_dropped = [], []
@@ -191,7 +200,7 @@ def _anchors(chunk, times):
             "unselected_dense_frame_count": sum(actual[0] <= t <= actual[-1] for t in times)-len(indices)}
 
 
-def select_direction_windows(frames, action_checks, max_windows=4):
+def select_direction_windows(frames, action_checks, max_windows=4, *, reserve_context=False):
     """Select <=5 actual frames per bounded query, preserving input objects.
 
     ``frames`` must be a list/tuple with finite, nonnegative, strictly increasing
@@ -204,10 +213,16 @@ def select_direction_windows(frames, action_checks, max_windows=4):
     prevents pairwise chaining from drifting between objects. The stable box is
     an observed medoid. Episodes may require multiple <=6-second chunks. A cap
     visits different episodes in chronological order before their second chunks.
-    Context cannot evict an already selected interior frame.
+    By default context cannot evict an already selected interior frame. The
+    opt-in ``reserve_context=True`` instead chooses up to three interior frames
+    (actual endpoints and nearest middle), reserving one slot for each context
+    side. Missing context and the six-second limit remain explicit; neither
+    mode establishes direction or recovers upstream missed interactions.
     """
     if type(max_windows) is not int or max_windows < 0:
         raise ValueError("max_windows must be a nonnegative integer")
+    if type(reserve_context) is not bool:
+        raise ValueError("reserve_context must be a boolean")
     if not isinstance(frames, (list, tuple)) or not isinstance(action_checks, list):
         raise TypeError("frames must be a list/tuple and action_checks a list")
     times = [getattr(frame, "timestamp_sec", None) for frame in frames]
@@ -222,7 +237,7 @@ def select_direction_windows(frames, action_checks, max_windows=4):
         chunks, skipped = _chunks(episode, times)
         empty_splits_skipped += skipped
         for chunk_index, chunk in enumerate(chunks):
-            anchors = _anchors(chunk, times)
+            anchors = _anchors(chunk, times, reserve_context=reserve_context)
             if anchors is None:
                 dropped.append({"source_window_ids": sorted(chunk["ids"]), "reason": "insufficient_actual_frames",
                                 "interaction_start_sec": chunk["start"], "interaction_end_sec": chunk["end"]})
@@ -257,6 +272,11 @@ def select_direction_windows(frames, action_checks, max_windows=4):
               "oversized_window_overlap_sec": _MERGE_GAP, "contact_evidence_sec_used": False,
               "oversized_empty_splits": "skip_when_no_sampled_frame_can_be_inside_or_in_context",
               "minimum_actual_frames": 2, "interpretation": "experimental_query_selection_not_direction"}
+    if reserve_context:
+        # Do not change the legacy policy fingerprint when the option is off.
+        policy.update(revision=2, max_interior_frames_per_window=3,
+                      anchors="actual_inside_endpoints_then_nearest_interior_midpoint_earlier_tie",
+                      context="reserved_slots_farthest_within_context_before_then_after_duration_cap")
     return {"kind": "direction_query_selection_not_actions", "windows": selected, "dropped_windows": dropped,
             "candidate_count": len(ranked), "selected_count": len(selected), "capped": len(ranked) > max_windows,
             "policy": policy, "policy_sha256": hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest(),

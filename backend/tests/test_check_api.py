@@ -111,6 +111,30 @@ def test_poll_failed_is_distinct_from_no_violations(monkeypatch, capsys):
     assert KEY not in output
 
 
+def test_real_requires_explicit_video_before_creation_or_upload(monkeypatch, capsys):
+    mock_main(monkeypatch, mode="real")
+    monkeypatch.setattr(sys, "argv", ["check_api", "--expect-mode", "real"])
+    monkeypatch.setattr(check_api, "create_sample", lambda *args: pytest.fail("No synthetic real video"))
+    monkeypatch.setattr(check_api, "submit", lambda *args, **kwargs: pytest.fail("No implicit upload"))
+    assert check_api.main() == 1
+    assert "--video" in capsys.readouterr().out
+
+
+def test_poll_cannot_accept_done_after_shared_upload_deadline(monkeypatch):
+    values = iter([100, 301])
+    monkeypatch.setattr(check_api.time, "monotonic", lambda: next(values, 301))
+    monkeypatch.setattr(check_api, "request_json", lambda *args, **kwargs: done())
+    with pytest.raises(TimeoutError):
+        check_api.poll(object(), URL, KEY, JOB_ID, deadline=300)
+
+
+def test_expired_deadline_does_not_start_upload(monkeypatch, tmp_path):
+    monkeypatch.setattr(check_api.time, "monotonic", lambda: 301)
+    monkeypatch.setattr(check_api, "request_json", lambda *args, **kwargs: pytest.fail("No late upload"))
+    with pytest.raises(TimeoutError):
+        check_api.submit(object(), URL, KEY, tmp_path / "never_read.mov", deadline=300)
+
+
 @pytest.mark.parametrize(("status", "exit_code"), [("done", 0), ("failed", 2), ("malformed", 1)])
 def test_main_reports_phase_timings_without_keys_or_evidence(monkeypatch, tmp_path, capsys, status, exit_code):
     mock_main(monkeypatch)
@@ -120,8 +144,9 @@ def test_main_reports_phase_timings_without_keys_or_evidence(monkeypatch, tmp_pa
     monkeypatch.setattr(sys, "argv", ["check_api", "--video", str(video), "--expect-mode", "real"])
     submitted = []
 
-    def submit(opener, url, key, path):
+    def submit(opener, url, key, path, *, deadline):
         submitted.append((url, key, path))
+        assert deadline == 400
         return JOB_ID
 
     monkeypatch.setattr(check_api, "submit", submit)
@@ -145,3 +170,58 @@ def test_main_reports_phase_timings_without_keys_or_evidence(monkeypatch, tmp_pa
         match = re.search(re.escape(label) + r": (\d+\.\d{2}) с\.", output)
         assert match is not None, f"Missing timing: {label}"
         assert float(match.group(1)) >= 0
+
+
+def test_poll_rejects_a_valid_result_that_arrives_after_shared_deadline(monkeypatch):
+    clock = {"now": 299.0}
+    monkeypatch.setattr(check_api.time, "monotonic", lambda: clock["now"])
+
+    def late_result(*args, **kwargs):
+        assert kwargs["timeout"] == 1.0
+        clock["now"] = 300.0
+        return done("clean")
+
+    monkeypatch.setattr(check_api, "request_json", late_result)
+    with pytest.raises(TimeoutError):
+        check_api.poll(object(), URL, KEY, JOB_ID, deadline=300.0)
+
+
+def test_jpeg_validation_time_counts_toward_shared_deadline(monkeypatch, capsys):
+    clock = {"now": 299.0}
+    monkeypatch.setattr(check_api.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(check_api, "request_json", lambda *a, **k: done("clean"))
+
+    def slow_validation(result):
+        clock["now"] = 300.01
+        return {"verdict": "no_violation", "violations": []}
+
+    monkeypatch.setattr(check_api, "validate_result", slow_validation)
+    with pytest.raises(TimeoutError):
+        check_api.poll(object(), URL, KEY, JOB_ID, deadline=300.0)
+    assert "Статус: done" not in capsys.readouterr().out
+
+
+def test_slow_upload_cannot_reset_the_deadline_before_poll(monkeypatch, tmp_path, capsys):
+    mock_main(monkeypatch)
+    video = tmp_path / "neutral.mov"
+    video.write_bytes(b"synthetic")
+    monkeypatch.setattr(sys, "argv", ["check_api", "--video", str(video)])
+    clock = {"now": 100.0}
+    monkeypatch.setattr(check_api.time, "monotonic", lambda: clock["now"])
+
+    def upload(*args, deadline):
+        assert deadline == 400.0
+        clock["now"] = 399.0
+        return JOB_ID
+
+    def late_result(*args, **kwargs):
+        assert kwargs["timeout"] == 1.0
+        clock["now"] = 400.0
+        return done("clean")
+
+    monkeypatch.setattr(check_api, "submit", upload)
+    monkeypatch.setattr(check_api, "request_json", late_result)
+    assert check_api.main() == 1
+    output = capsys.readouterr().out
+    assert "Статус: done" not in output
+    assert KEY not in output

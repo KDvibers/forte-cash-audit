@@ -137,6 +137,84 @@ class DirectionWindowTests(unittest.TestCase):
         self.assertEqual(window["context_indices_added"], [])
         self.assertEqual([r["reason"] for r in window["context_candidates_dropped"]], ["no_spare_frame_slot"]*2)
 
+    def test_opt_in_reserves_before_and_after_instead_of_five_inside_frames(self):
+        frames = regular()
+        rows = [action(start=2, end=4)]
+        legacy = select_direction_windows(frames, rows)
+        selected = select_direction_windows(frames, rows, reserve_context=True)
+        window = selected["windows"][0]
+        self.assertEqual(window["frame_timestamps"], [1.5, 2, 3, 4, 4.5])
+        self.assertEqual(window["context_indices_added"], [3, 9])
+        self.assertEqual(window["context_candidates_dropped"], [])
+        self.assertEqual(window["source_window_ids"], legacy["windows"][0]["source_window_ids"])
+        self.assertEqual(selected["coverage"]["selected_image_reference_count"], 5)
+        self.assertFalse(selected["coverage"]["upstream_missed_or_uncertain_interactions_recovered"])
+
+    def test_context_mode_preserves_irregular_actual_pts_and_input_bytes(self):
+        times = [.97, 1.03, 1.54, 1.98, 2.04, 2.51, 2.98]
+        frames = pool(times)
+        row = action(start=1.03, end=2.51)
+        snapshot = deepcopy(row)
+        window = select_direction_windows(frames, [row], reserve_context=True)["windows"][0]
+        self.assertEqual(window["frame_timestamps"], [.97, 1.03, 1.98, 2.51, 2.98])
+        self.assertEqual(window["frame_timestamps"], [frames[i].timestamp_sec for i in window["frame_indices"]])
+        self.assertEqual(row, snapshot)
+        self.assertEqual([f.timestamp_sec for f in frames], times)
+        self.assertEqual([f.jpeg for f in frames], [b"not-an-image"]*len(times))
+
+    def test_context_mode_edges_report_missing_side_without_filling_with_inside(self):
+        for start, end, expected, missing in (
+                (0, 2, [0, 1, 2, 2.5], "before"),
+                (2, 4, [1.5, 2, 3, 4], "after")):
+            with self.subTest(side=missing):
+                window = select_direction_windows(regular(4), [action(start=start, end=end)],
+                                                  reserve_context=True)["windows"][0]
+                self.assertEqual(window["frame_timestamps"], expected)
+                self.assertEqual(window["context_candidates_dropped"], [{
+                    "side": missing, "frame_index": None, "reason": "video_edge_or_no_frame_in_context"}])
+        one = select_direction_windows(pool([0]), [action(start=0, end=0)], reserve_context=True)
+        self.assertEqual(one["windows"], [])
+        self.assertEqual(one["dropped_windows"][0]["reason"], "insufficient_actual_frames")
+
+    def test_context_mode_never_trades_away_endpoints_to_exceed_six_seconds(self):
+        window = select_direction_windows(regular(8), [action(start=1, end=6.5)],
+                                          reserve_context=True)["windows"][0]
+        self.assertEqual(window["frame_timestamps"], [.5, 1, 3.5, 6.5])
+        self.assertEqual(window["end_sec"]-window["start_sec"], 6)
+        self.assertEqual(window["context_candidates_dropped"], [{
+            "side": "after", "frame_index": 14, "reason": "duration_cap"}])
+        full = select_direction_windows(regular(8), [action(start=1, end=7)],
+                                        reserve_context=True)["windows"][0]
+        self.assertEqual(full["frame_timestamps"], [1, 4, 7])
+        self.assertEqual([r["reason"] for r in full["context_candidates_dropped"]], ["duration_cap"]*2)
+
+    def test_context_mode_distinct_middle_keeps_sparse_interior_samples(self):
+        # The nominal midpoint is past every interior sample. It must not
+        # collapse the middle choice onto the already selected endpoint.
+        frames = pool([0, 1, 1.01, 1.02, 3.1, 4])
+        window = select_direction_windows(frames, [action(start=.5, end=3)],
+                                          reserve_context=True)["windows"][0]
+        self.assertEqual(window["frame_timestamps"], [0, 1, 1.01, 1.02, 3.1])
+        self.assertEqual(len(set(window["frame_indices"])), 5)
+
+    def test_context_mode_is_explicit_reproducible_and_legacy_sha_unchanged(self):
+        frames = regular()
+        rows = [action("b", 3.5, 5), action("a", 1, 3)]
+        legacy = select_direction_windows(frames, rows)
+        self.assertEqual(legacy, select_direction_windows(frames, rows, reserve_context=False))
+        self.assertEqual(legacy["policy_sha256"],
+                         "adf7ed909f85e6e53ced6137fafca08eee1e21f3a15d8d00b645940e167098c1")
+        current = select_direction_windows(frames, rows, reserve_context=True)
+        self.assertNotEqual(current["policy_sha256"], legacy["policy_sha256"])
+        self.assertEqual(current, select_direction_windows(frames, list(reversed(rows)), reserve_context=True))
+        rows[0].update(truth="remove", video_id=35, contact_evidence_sec=[999])
+        self.assertEqual(current, select_direction_windows(frames, rows, reserve_context=True))
+        with self.assertRaises(TypeError):
+            select_direction_windows(frames, rows, 4, True)
+        for invalid in (None, 0, 1, "true", []):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                select_direction_windows(frames, rows, reserve_context=invalid)
+
     def test_edges_single_frame_and_empty_pool_never_fabricate_context(self):
         window = select_direction_windows(regular(2), [action(start=0, end=1)])["windows"][0]
         self.assertEqual(window["frame_timestamps"], [0, .5, 1, 1.5])

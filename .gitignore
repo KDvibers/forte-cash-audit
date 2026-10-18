@@ -28,6 +28,7 @@
 *.key
 .venv/
 .venv-app/
+.venv-real/
 venv/
 __pycache__/
 *.py[cod]

@@ -1,7 +1,8 @@
 """Run a small public-API smoke check without exposing the API key or image data.
 
 Usage: python -m backend.check_api [--expect-mode real] [--video path.mov] [--key-file path.txt]
-The default input is a locally generated neutral MOV, not bank footage.
+Only mock permits a generated neutral MOV. Real requires an explicit --video;
+use backend.check_real for bounded public acceptance and concurrent uploads.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from .validation import validate_result
 
 
 STARTUP_TIMEOUT_SECONDS = 100
-JOB_TIMEOUT_SECONDS = 330
+JOB_TIMEOUT_SECONDS = 300
 
 
 class CheckError(Exception):
@@ -84,7 +85,17 @@ def wait_ready(opener, url: str) -> dict:
     raise TimeoutError("Сервер или исполнитель не стали готовы за отведённое время.")
 
 
-def submit(opener, url: str, key: str, video: Path) -> str:
+def remaining_time(deadline: float, cap: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Истёк общий лимит в пять минут, включая отправку и проверку ответа.")
+    return min(cap, remaining)
+
+
+def submit(opener, url: str, key: str, video: Path, *, deadline: float | None = None) -> str:
+    if deadline is None:
+        deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+    remaining_time(deadline, JOB_TIMEOUT_SECONDS)
     boundary = "cash-audit-check-" + uuid.uuid4().hex
     prefix = (f"--{boundary}\r\n"
               'Content-Disposition: form-data; name="file"; filename="check.mov"\r\n'
@@ -92,10 +103,15 @@ def submit(opener, url: str, key: str, video: Path) -> str:
     suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
 
     def body():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("Истёк полный срок проверки.")
         yield prefix
         with video.open("rb") as handle:
             while chunk := handle.read(1024 * 1024):
+                remaining_time(deadline, JOB_TIMEOUT_SECONDS)
                 yield chunk
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("Истёк полный срок проверки.")
         yield suffix
 
     request = Request(url + "/api/v1/analyze", data=body(), method="POST", headers={
@@ -103,27 +119,37 @@ def submit(opener, url: str, key: str, video: Path) -> str:
         "Content-Type": f"multipart/form-data; boundary={boundary}",
         "Content-Length": str(len(prefix) + video.stat().st_size + len(suffix)),
     })
-    result = request_json(opener, request, timeout=60)
+    result = request_json(opener, request, timeout=remaining_time(deadline, 60))
+    remaining_time(deadline, JOB_TIMEOUT_SECONDS)
     job_id = result.get("job_id")
     if not isinstance(job_id, str) or not job_id:
         raise CheckError("Ответ загрузки не содержит job_id.")
     return job_id
 
 
-def poll(opener, url: str, key: str, job_id: str) -> int:
-    deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+def poll(opener, url: str, key: str, job_id: str, *, deadline: float | None = None) -> int:
+    if deadline is None:
+        deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
     print("Статус: processing")
     job_url = url + "/api/v1/jobs/" + quote(job_id, safe="")
     while time.monotonic() < deadline:
         result = request_json(opener, Request(job_url, headers={"X-API-Key": key}),
-                              timeout=min(15, max(0.1, deadline - time.monotonic())))
+                              timeout=remaining_time(deadline, 15))
+        remaining_time(deadline, JOB_TIMEOUT_SECONDS)
         status = result.get("status")
+        if result.get("job_id") != job_id:
+            raise CheckError("API вернул другое задание.")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Истёк полный срок проверки.")
         if status == "done":
             try:
                 validated = validate_result(result)
             except ValueError as exc:
                 raise CheckError("Ответ done не соответствует контракту результата или содержит повреждённые JPEG-кадры.") from exc
+            remaining_time(deadline, JOB_TIMEOUT_SECONDS)
             verdict, events = validated["verdict"], validated["violations"]
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Истёк полный срок проверки.")
             print(f"Статус: done; вердикт: {verdict}; событий: {len(events)}")
             return 0
         if status == "failed":
@@ -138,7 +164,7 @@ def poll(opener, url: str, key: str, job_id: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--video", type=Path, help="Путь к MOV; по умолчанию нейтральный тестовый ролик.")
+    parser.add_argument("--video", type=Path, help="Путь к MOV; обязателен для real, в mock допустим нейтральный образец.")
     parser.add_argument("--key-file", type=Path, help="Файл с ключом; значение ключа в командную строку не передаётся.")
     parser.add_argument("--expect-mode", choices=("real", "mock"),
                         help="Остановиться до отправки видео, если сервер работает в другом режиме.")
@@ -158,17 +184,22 @@ def main() -> int:
             print("ТЕСТОВЫЙ РЕЖИМ: ответы и кадры синтетические.")
         video = args.video
         if video is None:
+            if mode == "real":
+                raise CheckError("Для real явно укажите --video. Нейтральное видео автоматически не отправляется.")
             video = create_sample(Path(__file__).resolve().parent / ".local" / "sample.mov")
             print("Вход: нейтральный синтетический MOV. Эта проверка не измеряет точность модели.")
         if not video.is_file() or video.suffix.lower() != ".mov":
             raise CheckError("Не найден файл MOV для проверки.")
         started = time.monotonic()
+        deadline = started + JOB_TIMEOUT_SECONDS
         accepted_at = None
         try:
-            job_id = submit(opener, url, key, video)
+            job_id = submit(opener, url, key, video, deadline=deadline)
             accepted_at = time.monotonic()
             print(f"Передача и приём файла: {accepted_at - started:.2f} с.")
-            return poll(opener, url, key, job_id)
+            result = poll(opener, url, key, job_id, deadline=deadline)
+            remaining_time(deadline, JOB_TIMEOUT_SECONDS)
+            return result
         finally:
             finished = time.monotonic()
             if accepted_at is not None:

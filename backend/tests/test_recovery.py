@@ -80,6 +80,8 @@ def test_saved_mock_result_remains_available_when_real_worker_unavailable(tmp_pa
         self.readiness_message = 'Analyzer intentionally unavailable in recovery test.'
 
     monkeypatch.setattr(JobService, '_launch_worker', unavailable_worker)
+    # This fake worker must not contend with a running deployment's GPU lock.
+    monkeypatch.setattr('backend.service.REAL_LOCK_PATH', tmp_path / 'recovery-worker.lock')
     with TestClient(create_app(Settings(mode='real', data_dir=data_dir, api_key=KEY))) as client:
         use_cookie(client, cookie)
         bootstrap, _ = session(client)

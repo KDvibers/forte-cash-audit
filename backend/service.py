@@ -20,6 +20,9 @@ from .store import JobStore
 from .worker import worker_entry
 
 log = logging.getLogger(__name__)
+REAL_LOCK_PATH = Path(__file__).resolve().parent / ".local" / "real-analyzer.lock"
+REAL_RESTART_MESSAGE = ("Реальный анализ остановлен. Проверьте и перезапустите локальные серверы моделей, "
+                        "затем сервер приложения. Новые задания не запускаются.")
 
 
 class InstanceLock:
@@ -40,7 +43,7 @@ class InstanceLock:
                 fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             self.file.close()
-            raise RuntimeError("This data directory is already in use. Run Uvicorn with one worker.") from exc
+            raise RuntimeError("Another server already holds this data directory or real-analyzer lock. Run one real server per checkout, with one Uvicorn worker.") from exc
 
     def close(self):
         self.file.close()
@@ -89,8 +92,11 @@ class JobService:
         self._worker_started = 0
         self._startup_waiting = False
         self.ready = False
+        self.analysis_scope = None
         self.readiness_message = "Исполнитель запускается. Подождите несколько секунд."
         self._instance_lock = None
+        self._real_lock = None
+        self._deadlines: dict[str, float] = {}
         self._thread = None
 
     def start(self):
@@ -98,6 +104,9 @@ class JobService:
             raise RuntimeError("JobService has already been started")
         self._instance_lock = InstanceLock(self.settings.data_dir / "server.lock")
         try:
+            if self.settings.mode == "real":
+                REAL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+                self._real_lock = InstanceLock(REAL_LOCK_PATH)
             self.store.recover()
             self._cleanup_orphan_uploads()
             self._launch_worker()
@@ -107,6 +116,9 @@ class JobService:
             self._terminate_worker()
             self._instance_lock.close()
             self._instance_lock = None
+            if self._real_lock:
+                self._real_lock.close()
+                self._real_lock = None
             raise
 
     def _launch_worker(self):
@@ -114,6 +126,7 @@ class JobService:
             if self._stop.is_set():
                 return
             self.ready = False
+            self.analysis_scope = None
             self.readiness_message = "Исполнитель запускается. Подождите несколько секунд."
             context = multiprocessing.get_context("spawn")
             parent, child = context.Pipe()
@@ -136,6 +149,7 @@ class JobService:
     def _terminate_worker(self):
         with self._worker_mutex:
             self.ready = False
+            self.analysis_scope = None
             self._startup_waiting = False
             if self._process is not None:
                 if self._process.is_alive():
@@ -163,6 +177,9 @@ class JobService:
         if self._instance_lock:
             self._instance_lock.close()
             self._instance_lock = None
+        if self._real_lock:
+            self._real_lock.close()
+            self._real_lock = None
 
     def _unavailable(self, message: str, code: str = "worker_unavailable"):
         self.readiness_message = message
@@ -170,23 +187,65 @@ class JobService:
         self._active = None
         for job in self.store.pending():
             self.store.finish(job["job_id"], error=code)
+            self._deadlines.pop(job["job_id"], None)
+
+    def register_job(self, job: dict, started_monotonic: float):
+        """Publish the deadline before the coordinator can discover this job."""
+        with self._mutex:
+            self._deadlines[job["job_id"]] = started_monotonic + self.settings.job_timeout_seconds
+            try:
+                self.store.create(job)
+            except BaseException:
+                self._deadlines.pop(job["job_id"], None)
+                raise
+
+    def _deadline(self, job: dict) -> float:
+        # Pending jobs are failed on restart, so monotonic timestamps never
+        # cross process lifetimes. Fallback supports internal/imported jobs.
+        with self._mutex:
+            return self._deadlines.setdefault(job["job_id"], time.monotonic() + max(
+                0.0, self.settings.job_timeout_seconds - (time.time() - job["created_at"])))
 
     def _handle_event(self, event: dict):
         kind = event.get("kind")
         if kind == "ready":
+            self.analysis_scope = event.get("analysis_scope") if self.settings.mode == "real" else None
             self.ready = True
             self._startup_waiting = False
             self.readiness_message = ("Тестовый режим: ответы и кадры синтетические." if self.settings.mode == "mock" else
-                                      "Модуль анализатора подключён. Готовность весов проверяется его модулем при анализе.")
+                                      "Локальные модели проверены. Анализатор готов; доступные проверки указаны в интерфейсе.")
         elif kind == "result":
             if self._active and event.get("job_id") == self._active["job_id"]:
-                if time.time() - self._active["created_at"] >= self.settings.job_timeout_seconds:
+                if time.monotonic() >= self._deadline(self._active):
                     self.store.finish(self._active["job_id"], error="timeout")
                 else:
                     self.store.finish(self._active["job_id"], result=event.get("result"), error=event.get("error"))
+                self._deadlines.pop(self._active["job_id"], None)
                 self._active = None
+                if self.settings.mode == "real" and event.get("quarantine"):
+                    self._unavailable(REAL_RESTART_MESSAGE, "real_restart_required")
         else:
-            self._unavailable("Анализатор недоступен. Проверьте модуль analyzer.service и локальные зависимости, затем перезапустите сервер.")
+            if event.get("error") == "analyzer_contract":
+                self._unavailable("Версия анализатора несовместима: нужны analyze_video(video_path, budget_sec=...) "
+                                  "и check_ready(). Получите согласованные изменения Данияра и перезапустите сервер.",
+                                  "analyzer_contract")
+            elif self.settings.mode == "real" and self._active:
+                self._unavailable(REAL_RESTART_MESSAGE, "real_restart_required")
+            else:
+                self._unavailable("Анализатор или локальные модели недоступны. Проверьте оба сервера моделей "
+                                  "и зависимости, затем перезапустите приложение.", "analyzer_unavailable")
+
+    def _dispatch(self, job: dict):
+        # The upload, validation and queue share one monotonic deadline. The
+        # worker subtracts its readiness probe and passes the remainder to AI.
+        deadline = self._deadline(job)
+        if self.settings.mode == "real" and deadline - time.monotonic() <= 15.0:
+            self.store.finish(job["job_id"], error="timeout")
+            self._deadlines.pop(job["job_id"], None)
+            return
+        self._active = job
+        self.store.start(job["job_id"])
+        self._connection.send({**job, "deadline_monotonic": deadline})
 
     def _run(self):
         last_cleanup = 0
@@ -201,28 +260,35 @@ class JobService:
                             event = {"kind": "unavailable"}
                         self._handle_event(event)
                     if self._process is not None and not self._process.is_alive():
-                        self._unavailable("Исполнитель неожиданно остановился. Проверьте локальные зависимости и перезапустите сервер.")
+                        self._unavailable(REAL_RESTART_MESSAGE if self.settings.mode == "real" else
+                                          "Исполнитель неожиданно остановился. Проверьте локальные зависимости и перезапустите сервер.",
+                                          "real_restart_required" if self.settings.mode == "real" else "worker_unavailable")
                     if self._startup_waiting and time.monotonic() - self._worker_started > self.settings.worker_startup_seconds:
                         self._unavailable("Истекло время запуска анализатора. Проверьте зависимости и перезапустите сервер.", "startup_timeout")
                     for job in self.store.pending():
-                        if now - job["created_at"] >= self.settings.job_timeout_seconds:
+                        if time.monotonic() >= self._deadline(job):
                             self.store.finish(job["job_id"], error="timeout")
+                            self._deadlines.pop(job["job_id"], None)
                             if self._active and self._active["job_id"] == job["job_id"]:
                                 self._active = None
-                                self._terminate_worker()
-                                self._launch_worker()
+                                if self.settings.mode == "real":
+                                    self._unavailable(REAL_RESTART_MESSAGE, "real_restart_required")
+                                    break
+                                else:
+                                    self._terminate_worker()
+                                    self._launch_worker()
                     if self.ready and self._active is None and not self._stop.is_set():
                         waiting = self.store.pending()
                         if waiting:
-                            self._active = waiting[0]
-                            self.store.start(self._active["job_id"])
-                            self._connection.send(self._active)
+                            self._dispatch(waiting[0])
                     if now - last_cleanup > 60:
                         self.cleanup()
                         last_cleanup = now
                 except Exception as exc:
                     log.error("Job coordinator error (%s)", type(exc).__name__)
-                    self._unavailable("Ошибка исполнителя. Перезапустите сервер после проверки локального журнала.", "worker_error")
+                    self._unavailable(REAL_RESTART_MESSAGE if self.settings.mode == "real" else
+                                      "Ошибка исполнителя. Перезапустите сервер после проверки локального журнала.",
+                                      "real_restart_required" if self.settings.mode == "real" else "worker_error")
         finally:
             self._terminate_worker()
 
@@ -268,7 +334,8 @@ class JobService:
                 raise HTTPException(503, detail=self.readiness_message, headers={"Retry-After": "5"})
             if upload_id and (owner, upload_id) in self._uploads:
                 raise HTTPException(409, "Этот файл уже загружается. Дождитесь ответа первого запроса.")
-            if len(self.store.pending()) + len(self._reservations) >= self.settings.max_pending_jobs:
+            admitted = {job['job_id'] for job in self.store.pending()} | self._reservations
+            if len(admitted) >= self.settings.max_pending_jobs:
                 raise HTTPException(429, "Очередь заполнена. Повторите загрузку немного позже.", headers={"Retry-After": "5"})
             rate = self._rates[rate_key]
             now = time.monotonic()

@@ -9,8 +9,9 @@ from pathlib import Path
 import time
 
 from .local_client import LocalModelClient
-from .observations import ImageObserver, ObservationDeadline, policy_fingerprint, FEATURE_SUPPORT
-from .refinement import coarse_indices, refinement_indices
+from .observations import (ImageObserver, ObservationDeadline, policy_fingerprint, FEATURE_SUPPORT,
+                           CASH_SHORT_CIRCUIT_RULE)
+from .refinement import coarse_indices, refinement_indices, rule_refinement_indices
 from .smoke import GpuMonitor
 from .timeline import build_transitions
 from .events import build_observed_events
@@ -27,7 +28,7 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
                   max_frames=90, budget_sec=220.0, request_timeout_sec=20.0,
                   max_refinement_frames=24, cabinet_mode="context_crops", activity_base_url=None,
                   max_motion_windows=8, enable_actions=False, max_action_windows=16,
-                  action_reserve_sec=0.0):
+                  action_reserve_sec=0.0, skip_cash_when_person_present=False):
     """Save real full frames, strict observations and a bounded timeline locally.
 
     ``completed`` means all selected frames were processed without technical
@@ -35,6 +36,10 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
     The budget covers extraction and local analysis, excluding model startup,
     external queueing and video upload. Native decoding cannot be interrupted
     mid-call; budget exhaustion is checked again immediately afterwards.
+
+    ``skip_cash_when_person_present`` is opt-in and scoped to the current
+    absence-and-cash rule. Skipped cash remains uncertain; it cannot support
+    other cash events. Cabinet checks are unaffected.
     """
     for name, value in (("budget_sec", budget_sec), ("request_timeout_sec", request_timeout_sec)):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -51,6 +56,10 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
         raise ValueError("max_action_windows must be a nonnegative integer")
     if type(enable_actions) is not bool or (enable_actions and activity_base_url is None):
         raise ValueError("Action checks require activity_base_url and a boolean enable_actions")
+    if type(skip_cash_when_person_present) is not bool:
+        raise ValueError("skip_cash_when_person_present must be boolean")
+    if skip_cash_when_person_present and (activity_base_url is None or enable_actions):
+        raise ValueError("Cash short-circuit requires activity observations and cannot be used with action checks")
     if cabinet_mode == "disabled" and enable_actions:
         raise ValueError("Disabled cabinet observations are intended for the states-only rule pass")
     if (type(action_reserve_sec) not in (int, float) or not math.isfinite(action_reserve_sec)
@@ -67,7 +76,9 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
     report = {
         "schema_version": 1, "kind": "visual_observations_not_violation_verdict",
         "video_path": str(Path(video_path).resolve()), "started_utc": datetime.now(timezone.utc).isoformat(),
-        "policy_sha256": policy_fingerprint(cabinet_mode, cash_enabled=activity_base_url is not None), "status": "running",
+        "policy_sha256": policy_fingerprint(
+            cabinet_mode, cash_enabled=activity_base_url is not None,
+            skip_cash_when_person_present=skip_cash_when_person_present), "status": "running",
         "settings": {"base_url": base_url, "interval_sec": interval_sec, "max_frames": max_frames,
                      "cabinet_mode": cabinet_mode, "activity_base_url": activity_base_url,
                      "budget_sec": budget_sec, "request_timeout_sec": request_timeout_sec,
@@ -75,6 +86,7 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
                      "max_motion_windows": max_motion_windows, "enable_actions": enable_actions,
                      "max_action_windows": max_action_windows,
                      "action_reserve_sec": action_reserve_sec,
+                     "skip_cash_when_person_present": skip_cash_when_person_present,
                      "counter_discovery_model_role": "activity_4b",
                      "cabinet_action_gate": "trusted_open_observation_inside_window_v1",
                      "expected_image_min_tokens": 1024, "expected_image_max_tokens": 1280},
@@ -93,6 +105,17 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
             "Spatial agreement is a consistency check by one model, not independent or calibrated confidence.",
         ],
     }
+    if skip_cash_when_person_present:
+        report["settings"]["refinement_policy"] = "absence_and_cash_condition_v1"
+        report["cash_observation_scope"] = {
+            "rule_id": CASH_SHORT_CIRCUIT_RULE, "revision": 1,
+            "skip_condition": "final_person_yes_without_person_error",
+            "skipped_state": "uncertain", "cabinet_checks": "unchanged",
+        }
+        report["limitations"].append(
+            "Cash checks are skipped after confirmed visible presence only for the current absence-and-cash rule; "
+            "skipped cash stays uncertain and cannot support other cash events."
+        )
     if enable_actions:
         report.update(action_checks=[], action_support=ACTION_SUPPORT,
                       action_policy_sha256=action_policy_fingerprint())
@@ -112,13 +135,34 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
         temp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(destination / "report.json")
 
+    def runtime_metadata(client):
+        remaining = deadline-time.perf_counter()
+        if remaining <= 0:
+            raise ObservationDeadline("Video budget exhausted before runtime metadata")
+        previous_timeout = client.timeout
+        client.timeout = min(request_timeout_sec, remaining)
+        try:
+            try:
+                runtime = client.server_info()
+            except Exception as error:
+                if time.perf_counter() >= deadline:
+                    raise ObservationDeadline("Runtime metadata request reached the video deadline") from error
+                raise
+            if time.perf_counter() >= deadline:
+                raise ObservationDeadline("Runtime metadata response arrived after the video deadline")
+            return runtime
+        finally:
+            client.timeout = previous_timeout
+
     monitor = GpuMonitor()
     try:
         client = LocalModelClient(base_url, timeout=request_timeout_sec)
         try:
-            report["runtime"] = client.server_info()
+            report["runtime"] = runtime_metadata(client)
             if report["runtime"].get("model_path"):
                 report["model_label"] = Path(report["runtime"]["model_path"]).name
+        except ObservationDeadline:
+            raise
         except Exception as error:
             # Some compatible local servers do not expose /props.
             report["runtime_metadata_error"] = str(error)
@@ -126,16 +170,20 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
         if activity_base_url is not None:
             activity_client = LocalModelClient(activity_base_url, timeout=request_timeout_sec)
             try:
-                report["runtime_activity"] = activity_client.server_info()
+                report["runtime_activity"] = runtime_metadata(activity_client)
                 if report["runtime_activity"].get("model_path"):
                     report["activity_model_label"] = Path(report["runtime_activity"]["model_path"]).name
+            except ObservationDeadline:
+                raise
             except Exception as error:
                 report["activity_runtime_metadata_error"] = str(error)
-        observer = ImageObserver(client, cabinet_mode=cabinet_mode, activity_client=activity_client)
+        observer = ImageObserver(client, cabinet_mode=cabinet_mode, activity_client=activity_client,
+                                 skip_cash_when_person_present=skip_cash_when_person_present)
         with monitor:
             # Decode a denser pool once. Only coarse frames and selected short
             # windows are sent to the model; no repeat decode for each window.
-            sampled = sample_video(video_path, max_frames=600, max_side=1280, interval_sec=0.5)
+            sampled = sample_video(video_path, max_frames=600, max_side=1280, interval_sec=0.5,
+                                   deadline=deadline)
             frames = sampled["frames"]
             report.update({key: value for key, value in sampled.items() if key != "frames"})
             report["available_frame_count"] = len(frames)
@@ -144,6 +192,13 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
             report["coarse_frame_count"] = len(selected)
             report["selected_frame_count"] = len(selected)
             report["selected_timestamps"] = [frames[i].timestamp_sec for i in selected]
+            report["coarse_max_sample_gap_sec"] = max(
+                (frames[right].timestamp_sec-frames[left].timestamp_sec
+                 for left, right in zip(selected, selected[1:])), default=0.0)
+            report["coarse_rule_max_gap_sec"] = 4.0
+            report["coarse_coverage_blockers"] = (
+                ["coarse_gap_exceeds_rule_max_gap"]
+                if report["coarse_max_sample_gap_sec"] > report["coarse_rule_max_gap_sec"] else [])
             report["sampling_capped"] |= math.ceil(frames[-1].timestamp_sec/interval_sec)+1 > max_frames
             save()
 
@@ -172,7 +227,8 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
                 frame_durations.append(time.perf_counter()-frame_started)
             frame_cost = max(frame_durations, default=0.0)*1.2
             report["budget_control"]["refinement_cost_estimate_sec"] = frame_cost
-            refinement = refinement_indices(frames, report["observations"], max_new_frames=max_refinement_frames)
+            refinement_selector = rule_refinement_indices if skip_cash_when_person_present else refinement_indices
+            refinement = refinement_selector(frames, report["observations"], max_new_frames=max_refinement_frames)
             report["refinement"] = refinement
             motion = propose_motion_windows(frames, report["observations"], max_windows=max_motion_windows,
                                             max_refinement_frames=max_refinement_frames, observed_indices=selected)
@@ -190,7 +246,8 @@ def observe_video(video_path, out, *, base_url="http://127.0.0.1:8080", interval
             # Preserve a single global refinement budget. Motion has priority so
             # identical coarse endpoints cannot hide an entire short cycle.
             combined = list(motion["refinement"]["selection_order"])
-            combined.extend(i for i in refinement["indices"] if i not in combined)
+            refinement_order = refinement.get("selection_order", refinement["indices"])
+            combined.extend(i for i in refinement_order if i not in combined)
             added = combined[:max_refinement_frames]
             report["combined_refinement"] = {"indices": sorted(added), "candidate_count": len(combined),
                 "capped": len(combined) > max_refinement_frames,

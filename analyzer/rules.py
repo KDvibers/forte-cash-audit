@@ -12,14 +12,17 @@ _RULE_ID = "cash_visible_after_person_disappears"
 _PERSON = "person_in_work_area"
 _CASH = "cash_on_worktop"
 _POLICY = {
-    "revision": 2,
+    "revision": 3,
     "rule_id": _RULE_ID,
     "confirmation_frames": 2,
     "presence_confirmation_frames": 2,
     "max_gap_sec": 4.0,
     "presence_context": "historical_presence_not_tracked_exit",
-    "timecode_semantics": "candidate_confirmation_not_departure",
+    "timecode_semantics": "first_matching_frame_after_confirmation_not_departure",
+    "condition_onset_bounds": "last_usable_false_to_first_true_in_same_pts_segment_not_departure",
     "evidence_selection": "last_confirmed_present_first_matching_confirmation",
+    "candidate_identity": "same_prior_confirmed_presence_merges_confirmed_matching_fragments",
+    "interruption": "retain_observed_states_without_asserting_continuous_visibility",
     "unknown_condition": "break_matching_run",
     "unknown_person": "break_new_presence_confirmation_but_keep_confirmed_history_in_same_segment",
     "gap": "reset_matching_run_and_presence_history",
@@ -97,13 +100,24 @@ def _episode(run, context):
         reasons.append("insufficient_consecutive_support")
     if history is None:
         reasons.append("missing_prior_confirmed_presence")
+    last_false = context["last_false"]
+    bounds = {
+        "last_false_sec": last_false["timestamp_sec"],
+        "first_true_sec": first["timestamp_sec"],
+        "last_false_frame_id": last_false["frame_id"],
+        "first_true_frame_id": first["frame_id"],
+        "unknown_frame_ids": list(context["onset_unknown_ids"]),
+        "evidence_ids": [last_false["frame_id"], first["frame_id"]],
+        "semantics": _POLICY["condition_onset_bounds"],
+    } if last_false else None
     result = {
         "type": _RULE_ID, "source_rule_id": _RULE_ID,
         "status": "blocked" if reasons else "candidate",
         "start_sec": first["timestamp_sec"], "end_sec": last["timestamp_sec"],
-        "timecode_sec": confirmation["timestamp_sec"] if confirmation is not None else None,
+        "timecode_sec": first["timestamp_sec"] if confirmation is not None else None,
         "confirmed_at_sec": confirmation["timestamp_sec"] if confirmation is not None else None,
         "timecode_semantics": _POLICY["timecode_semantics"],
+        "condition_onset_bounds": bounds,
         "last_present_id": history["last_present_id"] if history else None,
         "last_present_sec": history["last_present_sec"] if history else None,
         "prior_presence_frame_ids": list(history["prior_presence_frame_ids"]) if history else [],
@@ -118,6 +132,51 @@ def _episode(run, context):
     return result
 
 
+def _merge_candidates(episodes, rows):
+    """Group confirmed fragments by their actual historical presence evidence.
+
+    A false/unknown frame breaks confirmation, but cannot establish another
+    departure. Blocked single-frame fragments are deliberately not passed here.
+    Their observations remain visible in the interruptions between confirmed
+    fragments and in the separate blocked_candidates report.
+    """
+    candidates, by_presence = [], {}
+    positions = {row["frame_id"]: index for index, row in enumerate(rows)}
+    for episode in episodes:
+        key = tuple(episode["prior_presence_frame_ids"])
+        segment = {field: deepcopy(episode[field]) for field in (
+            "start_sec", "end_sec", "confirmed_at_sec", "matching_frame_ids",
+            "observed_frame_count", "condition_onset_bounds", "presence_context_unknown_frame_ids",
+        )}
+        candidate = by_presence.get(key)
+        if candidate is None:
+            candidate = deepcopy(episode)
+            candidate.update(matching_segments=[segment], interruptions=[])
+            candidates.append(candidate)
+            by_presence[key] = candidate
+            continue
+        before_id = candidate["matching_frame_ids"][-1]
+        after_id = episode["matching_frame_ids"][0]
+        between = rows[positions[before_id] + 1:positions[after_id]]
+        candidate["interruptions"].append({
+            "before_frame_id": before_id, "after_frame_id": after_id,
+            "start_sec": between[0]["timestamp_sec"], "end_sec": between[-1]["timestamp_sec"],
+            "frame_ids": [row["frame_id"] for row in between],
+            "unknown_frame_ids": [row["frame_id"] for row in between if _condition(row) == "unknown"],
+            "false_frame_ids": [row["frame_id"] for row in between if _condition(row) == "false"],
+            "unconfirmed_matching_frame_ids": [row["frame_id"] for row in between if _condition(row) == "true"],
+            "person_present_frame_ids": [row["frame_id"] for row in between if row["person"] == "yes"],
+            "cash_not_visible_frame_ids": [row["frame_id"] for row in between if row["cash"] == "no"],
+        })
+        candidate["matching_segments"].append(segment)
+        candidate["end_sec"] = episode["end_sec"]
+        candidate["matching_frame_ids"].extend(episode["matching_frame_ids"])
+        candidate["observed_frame_count"] += episode["observed_frame_count"]
+        candidate["presence_context_unknown_frame_ids"] = list(dict.fromkeys(
+            candidate["presence_context_unknown_frame_ids"] + episode["presence_context_unknown_frame_ids"]))
+    return candidates
+
+
 def evaluate_rules(report):
     """Return visual candidates, blocked episodes and rule-specific coverage.
 
@@ -126,9 +185,15 @@ def evaluate_rules(report):
     the same PTS segment. Unknown frames break matching runs and new presence
     confirmation, but do not erase an already observed historical presence.
     This is not identity recognition or continuous tracking of an exit.
-    The timecode is the second matching selected frame, when the rule gained
-    enough model observations; it is not a verified disappearance timestamp.
+    After confirmation the timecode refers to the first matching selected
+    frame; confirmed_at_sec separately retains the second. The last usable
+    false and first true bound a change in the sampled condition, not an exit.
+    Unknown observations do not replace the lower bound. Excessive PTS gaps
+    reset both presence history and the available lower bound.
     Evidence retains prior presence, first match and this confirmation frame.
+    Confirmed fragments with the same historical presence are one candidate;
+    their separate segments and interruptions do not imply continuous visibility.
+    A new independent candidate requires a new confirmed period of presence.
 
     Scoped errors block only their known feature; unknown scopes block all.
     Partial reports may retain supported positive candidates. Absence of a
@@ -150,6 +215,7 @@ def evaluate_rules(report):
     candidates, blocked_candidates = [], []
     assessed_ids, unknown_ids, true_ids, false_ids, gaps = [], [], [], [], []
     run, run_context, presence_run, history, context_unknown_ids = [], None, [], None, []
+    last_false, onset_unknown_ids = None, []
     previous = None
 
     def finish_run():
@@ -161,6 +227,7 @@ def evaluate_rules(report):
         if previous is not None and row["timestamp_sec"]-previous["timestamp_sec"] > _POLICY["max_gap_sec"]:
             finish_run()
             run, run_context, presence_run, history, context_unknown_ids = [], None, [], None, []
+            last_false, onset_unknown_ids = None, []
             gaps.append({"before_frame_id": previous["frame_id"], "after_frame_id": row["frame_id"],
                          "gap_sec": row["timestamp_sec"]-previous["timestamp_sec"]})
         previous = row
@@ -182,12 +249,18 @@ def evaluate_rules(report):
             (true_ids if condition == "true" else false_ids).append(row["frame_id"])
         if condition == "true":
             if not run:
-                run_context = {"history": deepcopy(history), "unknown_ids": list(context_unknown_ids)}
+                run_context = {"history": deepcopy(history), "unknown_ids": list(context_unknown_ids),
+                               "last_false": deepcopy(last_false), "onset_unknown_ids": list(onset_unknown_ids)}
             run.append(row)
         else:
             finish_run()
             run, run_context = [], None
+            if condition == "false":
+                last_false, onset_unknown_ids = row, []
+            else:
+                onset_unknown_ids.append(row["frame_id"])
     finish_run()
+    candidates = _merge_candidates(candidates, rows)
 
     selected, processed = report.get("selected_frame_count"), report.get("processed_frame_count")
     complete_selection = (report.get("all_selected_frames_processed") is True

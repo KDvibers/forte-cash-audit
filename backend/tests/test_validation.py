@@ -4,12 +4,16 @@ from __future__ import annotations
 import base64
 from copy import deepcopy
 import io
+import struct
+import subprocess
+from types import SimpleNamespace
 
 from PIL import Image
 import pytest
 
 from backend.mock_analyzer import analyze
-from backend.validation import validate_result
+from backend import validation
+from backend.validation import validate_result, validate_video, VideoValidationTimeout
 
 
 @pytest.fixture
@@ -67,3 +71,66 @@ def test_new_event_types_and_complete_description_are_preserved(result):
     validated = validate_result(result)
     assert validated["violations"][0]["type"] == event["type"]
     assert validated["violations"][0]["description"] == event["description"]
+
+
+@pytest.fixture
+def mov_header(tmp_path):
+    # Container marker only: subprocess results below are synthetic test doubles.
+    path = tmp_path / "synthetic.mov"
+    path.write_bytes(struct.pack(">I4s8s", 16, b"ftyp", b"qt      "))
+    return path
+
+
+def test_probe_and_decode_share_remaining_deadline(mov_header, monkeypatch):
+    clock, timeouts = [100.0], []
+    monkeypatch.setattr(validation.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(validation.shutil, "which", lambda name: "synthetic-ffprobe")
+
+    def run(command, *, timeout, **kwargs):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            clock[0] += 9
+            return SimpleNamespace(returncode=0, stdout=b'{"streams":[{"codec_type":"video"}]}')
+        clock[0] += 2
+        return SimpleNamespace(returncode=0, stdout=b"\xff\xd8synthetic")
+
+    monkeypatch.setattr(validation.subprocess, "run", run)
+    assert validate_video(mov_header, deadline_monotonic=112)["validation"] == "first_frame_decode"
+    assert timeouts == [10, 3]
+
+
+@pytest.mark.parametrize("phase", ["before", "probe", "decode"])
+def test_validation_deadline_expiry_never_produces_success(mov_header, monkeypatch, phase):
+    clock, calls = [100.0], []
+    deadline = 99 if phase == "before" else 105
+    monkeypatch.setattr(validation.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(validation.shutil, "which", lambda name: "synthetic-ffprobe")
+
+    def run(command, *, timeout, **kwargs):
+        calls.append(timeout)
+        if phase == "probe" or len(calls) == 2:
+            clock[0] = 105
+            raise subprocess.TimeoutExpired(command, timeout)
+        clock[0] += 4
+        return SimpleNamespace(returncode=0, stdout=b'{"streams":[{"codec_type":"video"}]}')
+
+    monkeypatch.setattr(validation.subprocess, "run", run)
+    with pytest.raises(VideoValidationTimeout):
+        validate_video(mov_header, deadline_monotonic=deadline)
+    assert len(calls) == {"before": 0, "probe": 1, "decode": 2}[phase]
+    if phase == "decode":
+        assert calls == [5, 1]
+
+
+def test_validation_without_deadline_keeps_previous_phase_limits(mov_header, monkeypatch):
+    timeouts = []
+    monkeypatch.setattr(validation.shutil, "which", lambda name: "synthetic-ffprobe")
+
+    def run(command, *, timeout, **kwargs):
+        timeouts.append(timeout)
+        return SimpleNamespace(returncode=0, stdout=(b'{"streams":[{"codec_type":"video"}]}'
+                               if len(timeouts) == 1 else b"\xff\xd8synthetic"))
+
+    monkeypatch.setattr(validation.subprocess, "run", run)
+    validate_video(mov_header)
+    assert timeouts == [10, 20]

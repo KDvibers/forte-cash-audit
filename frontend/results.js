@@ -8,6 +8,63 @@
   const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
   const validTime = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
   const validText = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 20000;
+  const negativeVerdictText = "По выполненным проверкам признаки нарушений не обнаружены";
+
+  function normalizeScope(value) {
+    const bounded = (text, limit) => typeof text === "string" && text.trim().length > 0 && text.length <= limit;
+    if (!record(value) || typeof value.complete_case_coverage !== "boolean" ||
+        !bounded(value.notice, 4000) || !Array.isArray(value.rules) ||
+        value.rules.length < 1 || value.rules.length > 100) return null;
+    const ids = new Set();
+    for (const rule of value.rules) {
+      if (!record(rule) || !bounded(rule.id, 200) || !bounded(rule.title, 500) || ids.has(rule.id)) return null;
+      ids.add(rule.id);
+    }
+    return {
+      rules: value.rules.map(({ id, title }) => ({ id, title })),
+      notice: value.notice, complete_case_coverage: value.complete_case_coverage,
+    };
+  }
+
+  function scopeText(value) {
+    const scope = normalizeScope(value);
+    if (!scope) return "Объём выполненных проверок не указан. Отсутствие событий не подтверждает отсутствие всех возможных нарушений.";
+    return `Проверяемые сценарии: ${scope.rules.map((rule) => rule.title).join("; ")}. ${scope.notice}` +
+      (scope.complete_case_coverage ? "" : " Этот набор проверок пока не охватывает все возможные нарушения.");
+  }
+
+  function descriptionParts(description) {
+    const parts = [];
+    let offset = 0;
+    // Parse URL-shaped tokens as data. Only exact official HTTPS origins become links.
+    for (const match of description.matchAll(/https?:\/\/[^\s<>"']+/gi)) {
+      const candidate = match[0].replace(/[.,;:!?)\]}]+$/, "");
+      let url;
+      try { url = new URL(candidate); } catch { continue; }
+      if (url.protocol !== "https:" || url.hostname !== "adilet.zan.kz" || url.port ||
+          url.username || url.password || /[\\\u0000-\u0020\u007f]/.test(candidate)) continue;
+      if (match.index > offset) parts.push({ text: description.slice(offset, match.index) });
+      parts.push({ text: candidate, href: url.href });
+      offset = match.index + candidate.length;
+    }
+    if (offset < description.length) parts.push({ text: description.slice(offset) });
+    return parts;
+  }
+
+  function renderDescription(description) {
+    const paragraph = element("p", "report-description");
+    for (const part of descriptionParts(description)) {
+      if (!part.href) paragraph.append(document.createTextNode(part.text));
+      else {
+        const link = element("a", "report-source-link", part.text);
+        link.href = part.href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        paragraph.append(link);
+      }
+    }
+    return paragraph;
+  }
 
   function jpegBase64(value) {
     if (typeof value !== "string" || value.length < 8 || value.length > MAX_IMAGE_LENGTH ||
@@ -415,7 +472,7 @@
     const heading = element("h3", "report-event-title", event.type);
     heading.id = "report-event-title";
     article.setAttribute("aria-labelledby", heading.id);
-    const description = element("p", "report-description", event.description);
+    const description = renderDescription(event.description);
     article.append(heading, timeButton(state, event.timecode_sec, "Событие · "), description);
     const evidence = element("section", "report-evidence");
     const evidenceTitle = element("h4", "", `Кадры события · ${state.frames.length}`);
@@ -452,7 +509,7 @@
     if (jump) seek(state, event.timecode_sec);
   }
 
-  function show(data, { file = null, sourceFileInfo: savedSourceInfo = null, mode = "real", onNewVideo } = {}) {
+  function show(data, { file = null, sourceFileInfo: savedSourceInfo = null, mode = "real", analysisScope = null, onNewVideo } = {}) {
     clear();
     if (!validate(data) || !["mock", "real"].includes(mode) || typeof document === "undefined") return false;
     const report = document.getElementById("report");
@@ -474,7 +531,7 @@
     const actions = element("div", "report-header-actions");
     const verdict = element("div", "report-verdict");
     verdict.dataset.verdict = data.verdict;
-    const verdictText = data.verdict === "violation" ? "Обнаружены признаки возможных нарушений" : "Нарушений не обнаружено";
+    const verdictText = data.verdict === "violation" ? "Обнаружены признаки возможных нарушений" : negativeVerdictText;
     verdict.append(element("strong", "", mode === "mock" ? `Тест: ${verdictText.toLowerCase()}` : verdictText),
       element("span", "report-total", `Событий: ${state.events.length}`));
     actions.append(verdict);
@@ -484,6 +541,7 @@
     header.append(group, actions);
     report.append(header);
     if (mode === "mock") report.append(element("p", "report-mode-notice", "Тестовый режим. События и кадры синтетические и не описывают содержимое загруженного видео."));
+    else report.append(element("p", "report-scope-notice", scopeText(analysisScope)));
     const layout = element("div", "report-layout");
     const main = element("div", "report-main");
     state.details = element("div", "report-event-content");
@@ -516,7 +574,7 @@
       const clean = element("div", "report-clean-state");
       clean.append(element("h3", "", mode === "mock" ? "Тестовый анализатор не вернул событий" : "Анализатор не вернул событий"),
         element("p", "", mode === "mock" ? "Это синтетический ответ. Список событий и кадры для него отсутствуют."
-          : "Для этого видео анализатор не указал признаков нарушений. Список событий и кадры отсутствуют."));
+          : "В выполненных проверках анализатор не указал событий. Это не подтверждает отсутствие других нарушений. Список событий и кадры отсутствуют."));
       main.append(clean);
     }
     main.append(makeVideo(state, file));
@@ -527,9 +585,9 @@
     return true;
   }
 
-  const api = Object.freeze({ validate, show, clear });
+  const api = Object.freeze({ validate, show, clear, normalizeScope, scopeText, negativeVerdictText });
   if (typeof window !== "undefined") window.CashAuditResults = api;
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { ...api, formatTimestamp, chronologicalEvents, matchSourceFile };
+    module.exports = { ...api, formatTimestamp, chronologicalEvents, matchSourceFile, descriptionParts, renderDescription };
   }
 })();

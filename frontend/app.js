@@ -23,6 +23,9 @@
   let file = null;
   let sourceFileInfo = null;
   let jobMode = null;
+  // A session describes the current service, not the scope of historical jobs.
+  // Keep the fresh upload snapshot only in memory; restored results use unknown scope.
+  let jobScope = null;
   let uploadId = null;
   let jobId = null;
   let active = false;
@@ -70,6 +73,9 @@
     el("mode-badge").dataset.mode = mode || "unknown";
     el("mode-notice").hidden = mode !== "mock";
     text("mode-notice", "Эта проверка выполнена в тестовом режиме: события и кадры синтетические и не описывают загруженное видео.");
+    const scope = uploadId ? jobScope : config?.analysis_scope;
+    el("analysis-scope-notice").hidden = mode !== "real";
+    text("analysis-scope-notice", mode === "real" ? report.scopeText(scope) : "");
   }
 
   function showSelection() {
@@ -175,7 +181,7 @@
     allowAbandon = false;
     completedResult = false;
     file = uploadId = jobId = null;
-    sourceFileInfo = jobMode = null;
+    sourceFileInfo = jobMode = jobScope = null;
     report?.clear();
     el("open-report").hidden = true;
     input.value = "";
@@ -479,7 +485,9 @@
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/ui/analyze");
     xhr.withCredentials = true;
-    xhr.timeout = 180000;
+    // Allow the server's whole-job budget plus response delivery, capped at five minutes.
+    // This only bounds this HTTP request; it never extends the server's deadline.
+    xhr.timeout = Math.min(300000, Math.ceil(config.job_timeout_seconds * 1000) + 15000);
     xhr.setRequestHeader("X-CSRF-Token", config.csrf_token);
     xhr.setRequestHeader("X-Upload-ID", uploadId);
     xhr.setRequestHeader("Accept", "application/json");
@@ -551,7 +559,7 @@
   function complete(data) {
     if (data.status === "done") {
       try {
-        if (!report?.show(data, { file, mode: jobMode, sourceFileInfo, onNewVideo: () => reset() })) {
+        if (!report?.show(data, { file, mode: jobMode, analysisScope: jobMode === "real" ? jobScope : null, sourceFileInfo, onNewVideo: () => reset() })) {
           pauseQuery("Не удалось открыть полный результат. Можно повторно запросить это же задание.");
           return;
         }
@@ -567,20 +575,40 @@
     restoreOnConnect = false;
     persist();
     stopTimers();
-    elapsed();
+    if (file) elapsed();
+    else text("elapsed-time", "Задание восстановлено. Длительность обработки недоступна.");
     hideRetry();
     clearError();
     if (data.status === "failed") {
-      text("selection-state", "Анализ не завершён");
-      text("selection-note", "Можно попробовать новое видео. Техническая ошибка не является заключением о нарушениях.");
-      result("failed", "Не удалось завершить анализ", "Сервер сообщил об ошибке обработки. Заключение по видео не сформировано.", "", "i-info");
-      text("upload-status", "Анализ завершился ошибкой. Заключение по видео не сформировано.");
+      const failures = {
+        timeout: "Истёк срок обработки, включая загрузку и очередь. Заключение по видео не сформировано.",
+        incomplete_analysis: "На выбранных кадрах не хватило надёжных визуальных признаков для вывода. Заключение по видео не сформировано.",
+        analysis_failed: "Анализатор не смог завершить проверку. Оператору нужно проверить состояние моделей. Заключение по видео не сформировано.",
+        analyzer_not_ready: "Локальные модели недоступны. Оператору нужно восстановить их работу. Заключение по видео не сформировано.",
+        analyzer_unavailable: "Анализатор недоступен. Оператору нужно проверить его запуск. Заключение по видео не сформировано.",
+        analyzer_contract: "Версия анализатора несовместима с сервером. Оператору нужно обновить интеграцию. Заключение по видео не сформировано.",
+        real_restart_required: "Проверка остановлена после сбоя анализатора. Оператору нужно перезапустить модели и приложение. Заключение по видео не сформировано.",
+        worker_unavailable: "Исполнитель анализа недоступен. Оператору нужно проверить сервер. Заключение по видео не сформировано.",
+        worker_error: "Исполнитель анализа завершился с ошибкой. Оператору нужно проверить сервер. Заключение по видео не сформировано.",
+        startup_timeout: "Анализатор не успел запуститься. Оператору нужно проверить модели и приложение. Заключение по видео не сформировано.",
+        server_stopped: "Сервер был остановлен во время проверки. Видео автоматически повторно не отправляется. Заключение по видео не сформировано.",
+        server_restarted: "Сервер перезапустился до завершения проверки. Видео автоматически повторно не отправляется. Заключение по видео не сформировано.",
+      };
+      const message = Object.hasOwn(failures, data.error_code) ? failures[data.error_code]
+        : "Сервер сообщил об ошибке обработки. Заключение по видео не сформировано.";
+      const incomplete = data.error_code === "incomplete_analysis";
+      text("selection-state", incomplete ? "Вывод не сформирован" : "Анализ не завершён");
+      text("selection-note", incomplete
+        ? "Недостаточные данные не подтверждают отсутствие нарушений. Можно начать другую проверку."
+        : "Техническая ошибка не является заключением о нарушениях. Повторную проверку можно начать после восстановления готовности сервера.");
+      result("failed", incomplete ? "Недостаточно данных для вывода" : "Не удалось завершить анализ", message, "", "i-info");
+      text("upload-status", message);
     } else {
       const violation = data.verdict === "violation";
       const mock = jobMode === "mock";
       text("selection-state", "Проверка завершена");
       text("selection-note", file ? "Можно выбрать следующее видео." : "Результат восстановлен. Для просмотра исходного видео выберите его локально в отчёте.");
-      const title = violation ? "Обнаружены признаки возможных нарушений" : "Нарушений не обнаружено";
+      const title = violation ? "Обнаружены признаки возможных нарушений" : report.negativeVerdictText;
       result("done", mock ? `Тест: ${title.toLowerCase()}` : title,
         mock ? "Это синтетический результат тестового анализатора, он не описывает содержимое загруженного видео."
           : "Анализ завершён. Изучите события, полные объяснения и кадры в результате проверки.",
@@ -588,7 +616,7 @@
       resultPanel.dataset.verdict = data.verdict;
       el("open-report").hidden = false;
       text("open-report", violation ? "События и кадры" : "Открыть результат");
-      text("upload-status", `${mock ? "Тестовая проверка" : "Проверка"} завершена. ${violation ? "Обнаружены признаки возможных нарушений." : "Нарушений не обнаружено."} Событий: ${data.violations.length}.`);
+      text("upload-status", `${mock ? "Тестовая проверка" : "Проверка"} завершена. ${title}. Событий: ${data.violations.length}.`);
     }
     controls();
     if (data.status === "done") el("report").focus();
@@ -657,6 +685,7 @@
     file = candidate;
     sourceFileInfo = { name: file.name, size: file.size, lastModified: file.lastModified };
     jobMode = config.mode;
+    jobScope = jobMode === "real" ? report.normalizeScope(config.analysis_scope) : null;
     uploadId = window.crypto.randomUUID();
     beganAt = Date.now();
     showSelection();

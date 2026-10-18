@@ -38,8 +38,14 @@ def _timestamp(frame: av.VideoFrame) -> Fraction:
     return frame.pts * Fraction(frame.time_base)
 
 
-def _scan(path: Path) -> tuple[list[_FrameStamp], Fraction | None]:
+def _check_deadline(deadline):
+    if deadline is not None and perf_counter() >= deadline:
+        raise TimeoutError("Video decoding budget exhausted")
+
+
+def _scan(path: Path, deadline=None) -> tuple[list[_FrameStamp], Fraction | None]:
     stamps: list[_FrameStamp] = []
+    _check_deadline(deadline)
     with av.open(str(path), mode="r") as container:
         if not container.streams.video:
             raise ValueError("The file does not contain a video stream.")
@@ -54,6 +60,7 @@ def _scan(path: Path) -> tuple[list[_FrameStamp], Fraction | None]:
         )
         # Selecting this stream explicitly never decodes an audio stream.
         for index, frame in enumerate(container.decode(stream)):
+            _check_deadline(deadline)
             timestamp = _timestamp(frame)
             duration_ticks = getattr(frame, "duration", None)
             duration = (
@@ -62,6 +69,7 @@ def _scan(path: Path) -> tuple[list[_FrameStamp], Fraction | None]:
                 else None
             )
             stamps.append(_FrameStamp(index, timestamp, duration))
+    _check_deadline(deadline)
     if not stamps:
         raise ValueError("The video does not contain any decodable frames.")
     # Variable intervals and reordered timestamps are handled on the PTS axis.
@@ -106,7 +114,7 @@ def _duration(stamps: list[_FrameStamp], stream_duration: Fraction | None) -> fl
 
 def sample_video(
     path: str | PathLike[str], max_frames: int = 12, max_side: int = 768,
-    *, interval_sec: float | None = None,
+    *, interval_sec: float | None = None, deadline: float | None = None,
 ) -> dict:
     """Return ``duration_sec``, ``frames`` and ``extraction_seconds``.
 
@@ -131,6 +139,9 @@ def sample_video(
     callers must not translate these errors into a ``no_violation`` verdict.
     """
     started = perf_counter()
+    if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+    _check_deadline(deadline)
     if isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames < 2:
         raise ValueError("max_frames must be an integer of at least 2.")
     if isinstance(max_side, bool) or not isinstance(max_side, int) or max_side < 1:
@@ -146,7 +157,7 @@ def sample_video(
     if not video_path.is_file():
         raise ValueError("path must identify a file, not a directory.")
 
-    stamps, stream_duration = _scan(video_path)
+    stamps, stream_duration = _scan(video_path, deadline=deadline)
     target_frames = max_frames
     capped = False
     if interval_sec is not None:
@@ -157,10 +168,12 @@ def sample_video(
     wanted = {stamp.index: stamp for stamp in selected}
     sampled: dict[int, VideoFrame] = {}
     origin = stamps[0].timestamp
+    _check_deadline(deadline)
     with av.open(str(video_path), mode="r") as container:
         if not container.streams.video:
             raise ValueError("The file no longer contains a video stream.")
         for index, frame in enumerate(container.decode(container.streams.video[0])):
+            _check_deadline(deadline)
             if index not in wanted:
                 continue
             timestamp = _timestamp(frame)
@@ -170,6 +183,7 @@ def sample_video(
             picture.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
             encoded = BytesIO()
             picture.save(encoded, format="JPEG", quality=90)
+            _check_deadline(deadline)
             sampled[index] = VideoFrame(
                 timestamp_sec=float(timestamp - origin),
                 jpeg=encoded.getvalue(),
@@ -180,6 +194,7 @@ def sample_video(
                 break
     if len(sampled) != len(wanted):
         raise RuntimeError("Not all selected video frames could be decoded.")
+    _check_deadline(deadline)
 
     return {
         "duration_sec": _duration(stamps, stream_duration),
