@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from analyzer.actions import ActionObserver
+from analyzer.actions import ActionObserver, action_policy_fingerprint
 from analyzer.video import VideoFrame
 
 
@@ -523,6 +523,145 @@ class CounterEdgeContactTests(unittest.TestCase):
         self.assertNotIn("contact_checks", record)
         self.assertEqual(record["calls"][-1]["response"]["observation"], {"hand_position": "away"})
         self.assertFalse(record["calls"][-1]["completed"])
+
+
+class ExhaustiveContactTests(unittest.TestCase):
+    assert_unknown = ActionSafetyTests.assert_unknown
+
+    def check(self, client, **kwargs):
+        return ActionObserver(FakeClient(), client).check(
+            frames_at((2., 2.4, 3.2)), region="desk", window_id="short-edge",
+            counter_box=[250, 250, 750, 750], exhaustive_contact=True, **kwargs)
+
+    def responses(self, sequence, hands, recheck=None):
+        values = [answer({"interaction": sequence})]
+        values.extend(answer({"hand_position": hand}) for hand in hands)
+        if recheck is not None:
+            values.append(answer({"interaction": recheck}))
+        return values
+
+    def test_negative_sequence_with_positive_last_edge_requires_chronological_pair(self):
+        client = FakeClient(*self.responses("no", ("away", "away", "front"), "yes"))
+        record = self.check(client)
+        self.assertEqual(record["status"], "ok")
+        self.assertEqual(record["result"]["interaction"], "yes")
+        self.assertEqual([c["images"].timestamp_sec for c in client.calls[1:4]], [2.4, 2., 3.2])
+        self.assertEqual([f.timestamp_sec for f in client.calls[-1]["images"]], [2.4, 3.2])
+        self.assertEqual(client.calls[0]["prompt"], client.calls[-1]["prompt"])
+        self.assertEqual(record["contact_recheck"], {"initial_interaction": "no",
+            "frame_timestamps": [2.4, 3.2], "interaction": "yes"})
+        self.assertEqual(record["contact_evidence_sec"], [3.2])
+        self.assertEqual(record["contact_evidence_kind"], "model_estimate_not_verified_onset")
+        self.assertEqual(record["result"]["counter_direction"], "uncertain")
+        self.assertEqual(record["result"]["cash_into_cabinet"], "uncertain")
+
+    def test_first_positive_edge_still_checks_other_edge_and_uses_first_pair(self):
+        for sequence in ("no", "uncertain"):
+            for final_edge in ("away", "front"):
+                with self.subTest(sequence=sequence, final_edge=final_edge):
+                    client = FakeClient(*self.responses(sequence, ("away", "top", final_edge), "yes"))
+                    record = self.check(client)
+                    self.assertEqual(record["result"]["interaction"], "yes")
+                    self.assertEqual(len(record["contact_checks"]), 3)
+                    self.assertEqual([f.timestamp_sec for f in client.calls[-1]["images"]], [2., 2.4])
+                    self.assertEqual(len(client.calls), 5)
+
+    def test_positive_middle_rechecks_disagreement_without_unnecessary_edges(self):
+        client = FakeClient(*self.responses("no", ("front",), "yes"))
+        record = self.check(client)
+        self.assertEqual(record["result"]["interaction"], "yes")
+        self.assertEqual(len(record["contact_checks"]), 1)
+        self.assertEqual([f.timestamp_sec for f in client.calls[-1]["images"]], [2., 2.4])
+        self.assertEqual(len(client.calls), 3)
+
+    def test_disagreeing_pair_cannot_be_or_merged_into_positive_or_negative(self):
+        for initial in ("no", "uncertain"):
+            for recheck in ("no", "uncertain"):
+                with self.subTest(initial=initial, recheck=recheck):
+                    client = FakeClient(*self.responses(initial, ("away", "away", "front"), recheck))
+                    record = self.check(client)
+                    self.assertEqual(record["status"], "ok")
+                    self.assert_unknown(record)
+                    self.assertEqual(record["contact_recheck"]["interaction"], recheck)
+                    self.assertEqual(record["contact_evidence_sec"], [3.2])
+
+    def test_all_away_can_support_negative_but_any_uncertainty_blocks_it(self):
+        for hands, expected in ((("away", "away", "away"), "no"),
+                                (("away", "uncertain", "away"), "uncertain"),
+                                (("uncertain", "away", "away"), "uncertain")):
+            with self.subTest(hands=hands):
+                client = FakeClient(*self.responses("no", hands))
+                record = self.check(client)
+                self.assertEqual(record["result"]["interaction"], expected)
+                self.assertEqual(len(client.calls), 4)
+                self.assertNotIn("contact_recheck", record)
+
+    def test_sequence_yes_with_first_contact_checks_both_edges_without_recheck(self):
+        client = FakeClient(*self.responses("yes", ("away", "top", "away")))
+        record = self.check(client)
+        self.assertEqual(record["result"]["interaction"], "yes")
+        self.assertEqual(len(client.calls), 4)
+        self.assertNotIn("contact_recheck", record)
+
+    def test_error_on_second_edge_cannot_accept_earlier_positive_or_negative(self):
+        for initial in ("yes", "no", "uncertain"):
+            for first in ("top", "away"):
+                with self.subTest(initial=initial, first=first):
+                    client = FakeClient(*self.responses(initial, ("away", first)), TimeoutError("last edge failed"))
+                    record = self.check(client)
+                    self.assertEqual(record["status"], "partial")
+                    self.assert_unknown(record)
+                    self.assertEqual(len(client.calls), 4)
+                    self.assertNotIn("contact_recheck", record)
+
+    def test_invalid_pair_response_remains_raw_and_uncertain(self):
+        for raw in (answer({"interaction": "yes"}, finish="length"),
+                    answer({"interaction": "yes", "direction": "load"}), TimeoutError("pair timeout")):
+            with self.subTest(raw=raw):
+                client = FakeClient(*self.responses("no", ("away", "away", "top")), raw)
+                record = self.check(client)
+                self.assertEqual(record["status"], "partial")
+                self.assert_unknown(record)
+                self.assertNotIn("interaction", record["contact_recheck"])
+                self.assertEqual(record["calls"][-1]["question"], "counter_sequence_contact_recheck")
+
+    def test_deadline_on_edge_or_pair_excludes_late_positive_and_stops(self):
+        for late_index in (2, 3, 4):
+            clock = FakeClock()
+            values = self.responses("no", ("away", "away", "top"), "yes")
+            durations = [1]*late_index+[10]
+            client = FakeClient(*values, clock=clock, durations=durations)
+            with self.subTest(late_index=late_index), patch("analyzer.actions.time.perf_counter", clock):
+                record = self.check(client, deadline=110)
+            self.assertEqual(record["status"], "partial")
+            self.assert_unknown(record)
+            self.assertEqual(len(client.calls), late_index+1)
+            self.assertFalse(record["calls"][-1]["completed"])
+            self.assertIn("response", record["calls"][-1])
+            self.assertEqual(record["errors"][0]["type"], "ObservationDeadline")
+
+    def test_opt_in_policy_is_distinct_and_default_policy_is_unchanged(self):
+        self.assertEqual(action_policy_fingerprint(), "4933f2ec8e5590875369e4c721b7406b04372f93777c26f0efa307e72d06f0da")
+        self.assertEqual(action_policy_fingerprint(), action_policy_fingerprint(exhaustive_contact=False))
+        self.assertNotEqual(action_policy_fingerprint(), action_policy_fingerprint(exhaustive_contact=True))
+        old = FakeClient(*self.responses("no", ("away",)))
+        record = ActionObserver(FakeClient(), old).check(frames_at(), region="desk", window_id="old",
+            counter_box=[250, 250, 750, 750])
+        self.assertEqual(record["result"]["interaction"], "no")
+        self.assertEqual(len(old.calls), 2)
+        self.assertEqual(record["policy_sha256"], action_policy_fingerprint())
+        self.assertNotIn("contact_evidence_kind", record)
+        new = self.check(FakeClient(*self.responses("yes", ("top",))))
+        self.assertEqual(new["policy_sha256"], action_policy_fingerprint(exhaustive_contact=True))
+
+    def test_nonboolean_opt_in_is_rejected_before_requests(self):
+        for value in (1, "yes", None):
+            client = FakeClient()
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ActionObserver(client, client).check(frames_at(), region="desk", window_id="bad", exhaustive_contact=value)
+            with self.assertRaises(ValueError):
+                action_policy_fingerprint(exhaustive_contact=value)
+            self.assertEqual(client.calls, [])
 
 
 if __name__ == "__main__":

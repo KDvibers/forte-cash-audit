@@ -92,7 +92,7 @@ class RuleServiceTests(unittest.TestCase):
         self.observe_seconds = 5.0
         self.mutate_source = False
 
-    def fake_ready(self):
+    def fake_ready(self, **kwargs):
         self.clock.now += 2
         return [{"url": "http://127.0.0.1:8080", "runtime": {"model_path": "synthetic-2b"}},
                 {"url": "http://127.0.0.1:8081", "runtime": {"model_path": "synthetic-4b"}}]
@@ -123,11 +123,11 @@ class RuleServiceTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "violation")
         self.assertEqual(len(result["violations"]), 1)
         event = result["violations"][0]
-        self.assertEqual(event["timecode_sec"], 3.9667)
+        self.assertEqual(event["timecode_sec"], 2.4667)
         # Last visible person, first match and the actual confirmation frame.
         expected = [report["observations"][i] for i in (1, 2, 3)]
         self.assertEqual(len(event["evidence_frames"]), 3)
-        self.assertEqual(event["evidence_frames"][-1]["timestamp_sec"], event["timecode_sec"])
+        self.assertEqual(event["evidence_frames"][1]["timestamp_sec"], event["timecode_sec"])
         for row, frame in zip(expected, event["evidence_frames"]):
             raw = (self.report_directory / row["image_path"]).read_bytes()
             self.assertEqual(frame["timestamp_sec"], row["timestamp_sec"])
@@ -135,6 +135,9 @@ class RuleServiceTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(raw).hexdigest(), row["image_sha256"])
         self.assertIn("ранее принятым", event["description"])
         self.assertIn("не установлены", event["description"])
+        self.assertIn("подтверждённое следующим кадром", event["description"])
+        self.assertIn("1.20 с", event["description"])
+        self.assertIn("3.97 с", event["description"])
         self.assertIn("https://adilet.zan.kz/rus/docs/V1900019680#z112", event["description"])
         self.assertEqual(report, original)
         self.ready.assert_not_called()
@@ -274,7 +277,9 @@ class RuleServiceTests(unittest.TestCase):
         self.assertLess(arguments["budget_sec"], metadata["budget_sec"] - 2)
         self.assertFalse(arguments["enable_actions"])
         self.assertEqual(arguments["cabinet_mode"], "disabled")
-        self.assertEqual(arguments["max_frames"], 60)
+        self.assertEqual(arguments["max_frames"], 80)
+        self.assertEqual(arguments["max_refinement_frames"], 0)
+        self.assertTrue(arguments["skip_cash_when_person_present"])
         self.assertEqual(arguments["interval_sec"], 2.0)
         saved = json.loads((self.out / "observations" / "report.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["source_video_sha256"], self.source_sha)
@@ -315,6 +320,31 @@ class RuleServiceTests(unittest.TestCase):
         self.assertFalse(evaluation["can_conclude_no_candidate"])
         self.assertIn("report_not_completed", evaluation["coverage"]["negative_blockers"])
 
+    def test_live_partial_positive_preserves_candidates_without_admitting_next_gpu_job(self):
+        self.report_status = "partial"
+        with self.assertRaises(service.IncompleteAnalysisError) as caught:
+            service.analyze_to_directory(self.video, self.out)
+        self.assertFalse(caught.exception.inference_completed)
+        self.assert_failed_job("IncompleteAnalysisError")
+        evaluation = json.loads((self.out / "rule_evaluation.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(evaluation["candidates"]), 1)
+        self.assertTrue((self.out / "observations" / "report.json").exists())
+
+    def test_positive_with_completed_summary_but_timeout_or_missing_samples_is_not_published(self):
+        for i, change in enumerate(({"errors": [{"type": "ObservationDeadline"}]},
+                                    {"budget_exceeded": True}, {"all_selected_frames_processed": False})):
+            with self.subTest(change=change):
+                self.out = self.directory / f"incomplete-positive-{i}"
+                def observe(source, destination, **kwargs):
+                    report = self.fake_observe(source, destination, **kwargs)
+                    report.update(change)
+                    return report
+                self.observe.side_effect = observe
+                with self.assertRaises(service.IncompleteAnalysisError) as caught:
+                    service.analyze_to_directory(self.video, self.out)
+                self.assertFalse(caught.exception.inference_completed)
+                self.assert_failed_job("IncompleteAnalysisError")
+
     def test_ready_failure_releases_worker_lock_and_a_subsequent_job_can_finish(self):
         self.ready.side_effect = RuntimeError("local model unavailable")
         with self.assertRaisesRegex(RuntimeError, "local model unavailable"):
@@ -335,7 +365,68 @@ class RuleServiceTests(unittest.TestCase):
             service.analyze_to_directory(self.video, self.out, budget_sec=20)
         self.assert_failed_job("TimeoutError")
         self.assertEqual(self.job()["total_seconds"], 20)
-        self.assertTrue((self.out / "rule_evaluation.json").exists())
+        self.assertFalse((self.out / "rule_evaluation.json").exists())
+
+    def test_backend_entrypoint_respects_reduced_budget_after_queue_wait(self):
+        self.observe_seconds = 18
+        with patch("analyzer.service._ROOT", self.directory):
+            with self.assertRaises(TimeoutError):
+                service.analyze_video(str(self.video), budget_sec=20)
+        jobs = list((self.directory / "runs" / "stage3").glob("service-*"))
+        self.assertEqual(len(jobs), 1)
+        self.out = jobs[0]
+        self.assert_failed_job("TimeoutError")
+        self.assertEqual(self.job()["budget_sec"], 20)
+
+    def test_late_result_file_write_does_not_publish_or_return_success(self):
+        self.observe_seconds = 17.5
+        original = Path.write_text
+
+        def slow_write(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path.name == "result.json.tmp":
+                self.clock.now += 1
+            return value
+
+        with patch.object(Path, "write_text", slow_write):
+            with self.assertRaises(TimeoutError):
+                service.analyze_to_directory(self.video, self.out, budget_sec=20)
+        self.assert_failed_job("TimeoutError")
+        self.assertFalse((self.out / "result.json.tmp").exists())
+
+    def test_late_final_metadata_revokes_the_result_and_releases_worker(self):
+        self.observe_seconds = 17.5
+        original = service._save
+
+        def slow_save(path, value, **kwargs):
+            original(path, value, **kwargs)
+            if path.name == "job.json" and value.get("status") == "done":
+                self.clock.now += 1
+
+        with patch("analyzer.service._save", side_effect=slow_save):
+            with self.assertRaises(TimeoutError):
+                service.analyze_to_directory(self.video, self.out, budget_sec=20)
+        self.assert_failed_job("TimeoutError")
+        self.assertEqual(self.job()["total_seconds"], 20.5)
+
+    def test_single_argument_entrypoint_retains_default_budget_and_valid_result(self):
+        with patch("analyzer.service._ROOT", self.directory):
+            result = service.analyze_video(str(self.video))
+        self.assertEqual(validate_result(result), result)
+        jobs = list((self.directory / "runs" / "stage3").glob("service-*"))
+        self.assertEqual(len(jobs), 1)
+        self.out = jobs[0]
+        self.assertEqual(self.job()["budget_sec"], 260)
+        self.assertEqual(self.job()["status"], "done")
+
+    def test_public_scope_lists_only_enabled_rules_without_model_requests(self):
+        scope = service.describe_scope()
+        self.assertEqual([rule["id"] for rule in scope["rules"]], [RULE_ID])
+        self.assertFalse(scope["complete_case_coverage"])
+        self.assertTrue(scope["notice"])
+        self.assertEqual(set(scope["rules"][0]), {"id", "title"})
+        self.ready.assert_not_called()
+        self.observe.assert_not_called()
 
     def test_invalid_budget_and_busy_worker_do_not_create_jobs_or_call_models(self):
         for budget in (True, -1, 0, 10, float("nan"), float("inf"), "260"):

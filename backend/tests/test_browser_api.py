@@ -91,7 +91,8 @@ def test_session_cookie_and_bootstrap_do_not_expose_api_key(browser_service):
     assert response.status_code == 200
     payload = response.json()
     assert set(payload) == {"csrf_token", "mode", "analyzer_ready", "message",
-                            "max_upload_bytes", "poll_interval_ms", "job_timeout_seconds"}
+                            "analysis_scope", "max_upload_bytes", "poll_interval_ms", "job_timeout_seconds"}
+    assert payload["analysis_scope"] is None
     assert isinstance(payload["csrf_token"], str) and len(payload["csrf_token"]) >= 32
     assert payload["mode"] == "mock"
     assert payload["analyzer_ready"] is True
@@ -109,6 +110,25 @@ def test_session_cookie_and_bootstrap_do_not_expose_api_key(browser_service):
     repeated, repeated_cookie = session(client)
     assert repeated_cookie == cookie
     assert repeated["csrf_token"] == payload["csrf_token"]
+
+
+def test_real_session_exposes_current_scope_without_changing_judge_contract(tmp_path, monkeypatch):
+    from backend.service import JobService
+
+    scope = {"rules": [{"id": "cash", "title": "Cash review"}],
+             "notice": "One supported signal", "complete_case_coverage": False}
+    monkeypatch.setattr(JobService, "start", lambda self: self._handle_event(
+        {"kind": "ready", "analysis_scope": scope}))
+    app = create_app(Settings(mode="real", data_dir=tmp_path / "real-session", api_key=KEY))
+    with TestClient(app) as client:
+        payload = client.get("/ui/session").json()
+        assert payload["mode"] == "real" and payload["analysis_scope"] == scope
+        coordinator = app.state.service
+        coordinator.store.create({"job_id": "saved", "owner": "api", "file_name": "synthetic.mov",
+                                  "file_size": 1, "video_path": "synthetic.mov", "created_at": time.time()})
+        coordinator.store.finish("saved", result={"verdict": "no_violation", "violations": []})
+        result = client.get("/api/v1/jobs/saved", headers={"X-API-Key": KEY}).json()
+        assert result == {"job_id": "saved", "status": "done", "verdict": "no_violation", "violations": []}
 
 
 @pytest.mark.parametrize(("scenario", "verdict", "count"), [
@@ -129,7 +149,7 @@ def test_browser_analyzer_failure_is_not_a_clean_verdict(tmp_path, browser_video
     with running_browser(tmp_path / "failure", mock_scenario="error") as client:
         bootstrap, _ = session(client)
         job_id = upload(client, browser_video, bootstrap["csrf_token"])
-        assert finish(client, job_id) == {"job_id": job_id, "status": "failed"}
+        assert finish(client, job_id) == {"job_id": job_id, "status": "failed", "error_code": "analysis_failed"}
 
 
 @pytest.mark.parametrize("cookie", [None, "forged-session"])

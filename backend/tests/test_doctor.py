@@ -109,26 +109,31 @@ def test_write_probe_removes_only_its_own_temporary_file(tmp_path):
 
 
 def test_mock_analyzer_warnings_do_not_contact_model(monkeypatch, project):
-    def unexpected_health():
+    def unexpected_health(*args):
         pytest.fail("Mock diagnostics must not contact the model")
 
-    monkeypatch.setattr(doctor, "check_model_health", unexpected_health)
+    monkeypatch.setattr(doctor, "check_analyzer_runtime", unexpected_health)
+    monkeypatch.setattr(doctor, "check_analyzer_dependencies", unexpected_health)
     assert [check.status for check in doctor.check_analyzer(project, "mock")] == ["WARN", "WARN"]
 
 
 def test_real_missing_module_and_pin_conflict_fail_even_with_ready_health(monkeypatch, project):
-    monkeypatch.setattr(doctor, "check_model_health", lambda: doctor.Check("OK", "health", "ready"))
+    monkeypatch.setattr(doctor, "check_analyzer_runtime", lambda root: doctor.Check("OK", "health", "ready"))
+    monkeypatch.setattr(doctor, "check_analyzer_dependencies", lambda root: [doctor.Check("OK", "av", "ready")])
+    monkeypatch.setattr(doctor, "check_model_health", lambda port: doctor.Check("OK", f"model {port}", "ready"))
     checks = doctor.check_analyzer(project, "real")
-    assert [check.status for check in checks] == ["FAIL", "FAIL", "OK"]
+    assert [check.status for check in checks] == ["FAIL", "FAIL", "OK", "OK", "OK", "OK"]
+    assert [check.name for check in checks][3:5] == ["model 8080", "model 8081"]
     assert not (project / "analyzer" / "service.py").exists()
 
 
+@pytest.mark.parametrize("port", [8080, 8081])
 @pytest.mark.parametrize("status,payload,expected", [
     (200, {"status": "ok"}, "OK"), (200, {"status": "loading model"}, "FAIL"),
     (200, {"analyzer_ready": True}, "FAIL"), (503, {"status": "ok"}, "FAIL"),
     (200, [], "FAIL"),
 ])
-def test_model_health_checks_body_and_uses_only_bounded_local_request(monkeypatch, status, payload, expected):
+def test_model_health_checks_body_and_uses_only_bounded_local_request(monkeypatch, status, payload, expected, port):
     handlers = []
 
     class Response:
@@ -143,14 +148,14 @@ def test_model_health_checks_body_and_uses_only_bounded_local_request(monkeypatc
 
     class Opener:
         def open(self, request, *, timeout):
-            assert request.full_url == "http://127.0.0.1:8080/health"
+            assert request.full_url == f"http://127.0.0.1:{port}/health"
             assert timeout == 3
             assert request.data is None
             assert "X-api-key" not in request.headers
             return response
 
     monkeypatch.setattr(doctor, "build_opener", lambda *args: (handlers.extend(args) or Opener()))
-    check = doctor.check_model_health()
+    check = doctor.check_model_health(port)
     assert check.status == expected
     assert any(isinstance(handler, ProxyHandler) and handler.proxies == {} for handler in handlers)
     redirect = next(handler for handler in handlers if isinstance(handler, HTTPRedirectHandler))
@@ -175,3 +180,53 @@ def test_cli_exit_status_does_not_treat_warnings_as_success_of_real_mode(monkeyp
     monkeypatch.setattr(doctor, "run_checks", lambda **kwargs: [doctor.Check("FAIL", "Модуль", "нет")])
     assert doctor.main(["--mode", "real", "--skip-port"]) == 1
     assert "ошибок — 1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("signature,ready_expression,expected_fragment", [
+    ("video_path", "[]", "одним аргументом"),
+    ("video_path, **kwargs", "[]", "одним аргументом"),
+    ("video_path, *, budget_sec=260", "False", "обе объявленные"),
+    ("video_path, *, budget_sec=260", "None", "обе объявленные"),
+    ("video_path, *, budget_sec=260", "[]", "обе объявленные"),
+    ("video_path, *, budget_sec=260", "[{'url':'http://127.0.0.1:8080'}]", "обе объявленные"),
+])
+def test_real_contract_probe_rejects_old_signature_and_incomplete_readiness(project, signature, ready_expression, expected_fragment):
+    (project / "analyzer" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "analyzer" / "service.py").write_text(
+        f"def analyze_video({signature}):\n    raise AssertionError('Never perform inference')\n"
+        f"def check_ready():\n    return {ready_expression}\n", encoding="utf-8")
+    result = doctor.check_analyzer_runtime(project)
+    assert result.status == "FAIL"
+    assert expected_fragment in result.detail
+
+
+@pytest.mark.parametrize("ready_result", ["[{'url':'http://127.0.0.1:8080'}, {'url':'http://127.0.0.1:8081'}]",
+                                         "({'url':'http://127.0.0.1:8080'}, {'url':'http://127.0.0.1:8081'})"])
+def test_contract_probe_accepts_explicit_budget_and_readiness_without_analyzing(project, ready_result):
+    (project / "analyzer" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "analyzer" / "service.py").write_text(
+        f"print('{SECRET}')\n"
+        "def analyze_video(video_path, *, budget_sec=260):\n    raise AssertionError('Never perform inference')\n"
+        f"def check_ready():\n    return {ready_result}\n", encoding="utf-8")
+    check = doctor.check_analyzer_runtime(project)
+    assert check.status == "OK"
+    assert SECRET not in check.detail
+
+
+def test_ready_failure_and_child_output_are_sanitized(monkeypatch, project):
+    monkeypatch.setattr(doctor, "run_hidden", lambda *a, **kw: SimpleNamespace(
+        returncode=1, stdout=SECRET, stderr=SECRET))
+    check = doctor.check_analyzer_runtime(project)
+    assert check.status == "FAIL"
+    assert SECRET not in check.detail
+
+
+def test_analyzer_dependencies_require_pyav_and_pillow_in_current_interpreter(monkeypatch, project):
+    payload = {"av": {"ok": True, "version": "16.0.1"}, "pillow": {"ok": True, "version": "0.9.0"}}
+    monkeypatch.setattr(doctor, "run_hidden", lambda *a, **kw: SimpleNamespace(
+        returncode=0, stdout=json.dumps(payload), stderr=""))
+    assert all(check.status == "OK" for check in doctor.check_analyzer_dependencies(project))
+    payload["av"] = {"ok": False, "error": SECRET}
+    checks = doctor.check_analyzer_dependencies(project)
+    assert checks[0].status == "FAIL"
+    assert SECRET not in rendered(checks)

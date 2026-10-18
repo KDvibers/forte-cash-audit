@@ -46,6 +46,9 @@
 .report-time-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; max-width: 100%; padding: 8px 11px; border: 1px solid #ebc3d2; border-radius: 9px; background: #fff5f9; color: #9a204e; font-size: 12px; line-height: 1.45; font-weight: 650; font-variant-numeric: tabular-nums; white-space: normal; overflow-wrap: anywhere; transition: background .16s, border-color .16s; }
 .report-time-button:hover:not(:disabled) { border-color: #cd7597; background: #ffebf3; }
 .report-description { margin-top: 15px; color: #564a51; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.report-source-link { color: #8b1d48; text-decoration: underline; text-underline-offset: 3px; }
+.report-source-link:focus-visible { outline: 3px solid #8b1245; outline-offset: 3px; }
+.report-scope-notice { margin-top: 16px; padding: 10px 13px; border: 1px solid var(--border); border-radius: 10px; background: #faf6f8; color: #564a51; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .report-evidence { padding-top: 20px; border-top: 1px solid var(--border); }
 .report-evidence h4 { margin: 0 0 13px; color: var(--ink); font-size: 15px; font-weight: 700; }
 .report-frame-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; gap: 12px; }

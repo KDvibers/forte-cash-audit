@@ -75,6 +75,8 @@ class Settings:
             raise ValueError("mock_delay_seconds must be finite and nonnegative")
         if self.max_upload_bytes < 1:
             raise ValueError("max_upload_mb must allow at least one byte")
+        if self.mode == "real" and self.job_timeout_seconds > 285:
+            raise ValueError("Real request budget must not exceed 285 seconds; reserve time for delivery within 300 seconds")
 
     @property
     def max_upload_bytes(self) -> int:

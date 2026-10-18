@@ -84,13 +84,17 @@ def device_origin(status: dict) -> str:
 
 
 def read_publications(binary: Path) -> dict:
-    # Both commands are read-only; checking both detects incompatible CLI output
-    # and a configuration changed by another operator during our inspection.
-    funnel = read_client_json(binary, "funnel", "status", "--json")
-    serve = read_client_json(binary, "serve", "status", "--json")
-    if funnel != serve:
-        raise LaunchError("Состояние Serve/Funnel изменилось во время проверки. Повторите запуск; чужие настройки не изменялись.")
-    return funnel
+    # These sequential read-only commands can straddle our own startup/cleanup.
+    # Accept only an agreeing pair, then let the caller enforce empty/owned state.
+    # Persistent disagreement still fails closed; no reset or ownership bypass.
+    for attempt in range(3):
+        funnel = read_client_json(binary, "funnel", "status", "--json")
+        serve = read_client_json(binary, "serve", "status", "--json")
+        if funnel == serve:
+            return funnel
+        if attempt < 2:
+            time.sleep(0.1)
+    raise LaunchError("Состояние Serve/Funnel изменилось во время проверки. Повторите запуск; чужие настройки не изменялись.")
 
 
 def require_empty_publications(binary: Path) -> None:
@@ -202,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", choices=("clean", "one", "multiple", "error"), default="multiple")
     parser.add_argument("--delay", type=float, default=2)
     parser.add_argument("--tailscale", type=Path)
+    parser.add_argument("--check-only", action="store_true", help="Run diagnostics without starting HTTP or publishing Funnel")
     args = parser.parse_args(argv)
     listener = None
     try:
@@ -214,11 +219,14 @@ def main(argv: list[str] | None = None) -> int:
         settings = Settings(mode=args.mode, data_dir=data, public_origin=origin,
                             mock_scenario=args.scenario, mock_delay_seconds=args.delay)
         from .doctor import run_checks
-        checks = run_checks(mode=args.mode, port=args.port, data_dir=data, skip_port=True)
+        checks = run_checks(mode=args.mode, port=args.port, data_dir=data, skip_port=not args.check_only)
         for check in checks:
             print(f"[{check.status}] {check.name}: {check.detail}", flush=True)
         if any(check.status == "FAIL" for check in checks):
             raise LaunchError("Исправьте ошибки диагностики. Публикация ещё не запускалась; автоматической подмены real на mock нет.")
+        if args.check_only:
+            print("Диагностика завершена: сервер, Funnel и анализ видео не запускались. Проверка не подтверждает качество или время реального анализа.", flush=True)
+            return 0
         if args.mode == "mock":
             from .make_sample import create_sample
             create_sample(data / "sample.mov")

@@ -1,0 +1,10 @@
+# Optional isolated Windows/CUDA experiment; not required by the web service.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+rfdetr==1.4.3
+transformers==4.57.6
+peft==0.17.1
+numpy==2.2.6
+Pillow==11.3.0
+av==16.0.1

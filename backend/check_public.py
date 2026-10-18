@@ -145,6 +145,8 @@ def poll(opener, url: str, job_id: str, headers: dict, *, browser=False):
 
 
 def run_check(url: str, expected_mode: str, key: str, api, browser):
+    if expected_mode != "mock":
+        raise CheckError("Нейтральная проверка предназначена только для mock. Для real используйте scripts/check-real.ps1 с явным MOV.")
     # Readiness and mode are checked before any POST, including access probes.
     health, _ = json_response(api, Request(url + "/health"))
     if health.get("mode") != expected_mode:

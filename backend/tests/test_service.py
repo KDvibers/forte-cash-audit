@@ -18,6 +18,7 @@ from backend.config import Settings
 from backend.main import create_app
 from backend.make_sample import create_sample
 from backend.store import JobStore
+from backend.service import JobService
 
 
 KEY = "test-only-key-never-use-in-production"
@@ -223,8 +224,9 @@ def test_preflight_validation_counts_toward_processing_deadline(tmp_path, video_
     monkeypatch.setattr(main_module, "validate_video", slow_validate)
     with running(tmp_path / "slow-preflight", job_timeout_seconds=0.2,
                  mock_delay_seconds=0) as client:
-        job_id = accepted(upload(client, video_bytes))
-        assert finish(client, job_id) == {"job_id": job_id, "status": "failed"}
+        response = upload(client, video_bytes)
+        assert response.status_code == 408
+        assert client.app.state.service.store.pending() == []
 
 
 def test_startup_removes_only_orphan_job_directories_and_recovers_old_job(tmp_path):
@@ -250,3 +252,53 @@ def test_startup_removes_only_orphan_job_directories_and_recovers_old_job(tmp_pa
         assert client.get(f"/api/v1/jobs/{known_id}", headers=AUTH).json() == {
             "job_id": known_id, "status": "failed"}
         assert store.get(known_id)["error_code"] == "server_restarted"
+
+
+@pytest.mark.parametrize("elapsed", [0, 100])
+def test_real_dispatch_preserves_request_deadline_after_queue_time(tmp_path, monkeypatch, elapsed):
+    from types import SimpleNamespace
+    from backend import service as service_module
+
+    coordinator = JobService(Settings(mode="real", data_dir=tmp_path / "budget", api_key=KEY))
+    job = {"job_id": "budget-job", "owner": "api", "file_name": "synthetic.mov", "file_size": 10,
+           "video_path": "synthetic.mov", "created_at": 1000.0}
+    coordinator.register_job(job, started_monotonic=100.0)
+    sent = []
+    coordinator._connection = SimpleNamespace(send=sent.append)
+    monkeypatch.setattr(service_module.time, "time", lambda: 1000.0 + elapsed)
+    monkeypatch.setattr(service_module.time, "monotonic", lambda: 100.0 + elapsed)
+    coordinator._dispatch(job)
+    assert sent == [{**job, "deadline_monotonic": 385.0}]
+    assert sent[0]["deadline_monotonic"] - service_module.time.monotonic() == 285.0 - elapsed
+    assert coordinator.store.get(job["job_id"])["started_at"] == 1000.0 + elapsed
+    assert "deadline_monotonic" not in coordinator.store.get(job["job_id"])
+
+
+def test_real_dispatch_exhausted_by_queue_fails_without_calling_worker(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from backend import service as service_module
+
+    coordinator = JobService(Settings(mode="real", data_dir=tmp_path / "expired", api_key=KEY))
+    job = {"job_id": "expired-job", "owner": "api", "file_name": "synthetic.mov", "file_size": 10,
+           "video_path": "synthetic.mov", "created_at": 1000.0}
+    coordinator.store.create(job)
+    sent = []
+    coordinator._connection = SimpleNamespace(send=sent.append)
+    monkeypatch.setattr(service_module.time, "time", lambda: 1273.0)
+    coordinator._dispatch(job)
+    saved = coordinator.store.get(job["job_id"])
+    assert sent == [] and coordinator._active is None
+    assert saved["status"] == "failed" and saved["error_code"] == "timeout"
+    assert saved["started_at"] is None
+
+
+def test_scope_clears_when_worker_stops_and_mock_never_adopts_real_scope(tmp_path):
+    scope = {"rules": [], "notice": "Limited", "complete_case_coverage": False}
+    coordinator = JobService(Settings(mode="real", data_dir=tmp_path / "scope", api_key=KEY))
+    coordinator._handle_event({"kind": "ready", "analysis_scope": scope})
+    assert coordinator.ready and coordinator.analysis_scope == scope
+    coordinator._terminate_worker()
+    assert not coordinator.ready and coordinator.analysis_scope is None
+    coordinator.settings.mode = "mock"
+    coordinator._handle_event({"kind": "ready", "analysis_scope": scope})
+    assert coordinator.ready and coordinator.analysis_scope is None

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import itertools
 import json
 from pathlib import Path
+import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -118,10 +119,44 @@ def test_read_client_json_hides_account_output_and_is_noninteractive(monkeypatch
 
 
 def test_concurrent_configuration_changes_are_not_overwritten(monkeypatch):
-    results = iter([{}, config()])
-    monkeypatch.setattr(funnel, "read_client_json", lambda *args: next(results))
+    results = iter([{}, config()] * 3)
+    reads, sleeps = [], []
+
+    def read(binary, *arguments):
+        reads.append(arguments)
+        return next(results)
+
+    monkeypatch.setattr(funnel, "read_client_json", read)
+    monkeypatch.setattr(funnel.time, "sleep", sleeps.append)
     with pytest.raises(funnel.LaunchError, match="изменилось"):
         funnel.read_publications(Path("client.exe"))
+    assert reads == [("funnel", "status", "--json"), ("serve", "status", "--json")] * 3
+    assert sleeps == [0.1, 0.1]
+
+
+def test_own_startup_transition_retries_until_two_status_commands_agree(monkeypatch, tmp_path):
+    # Preflight is empty. Our process appears between the next pair of reads.
+    results = iter([{}, {}, {}, config(), config(), config(), {}, {}])
+    monkeypatch.setattr(funnel, "read_client_json", lambda *args: next(results))
+    sleeps = []
+    monkeypatch.setattr(funnel.time, "sleep", sleeps.append)
+    process = FakeProcess()
+    monkeypatch.setattr(funnel.subprocess, "Popen", lambda *a, **k: process)
+    with funnel.funnel_process(Path("client.exe"), ORIGIN, 8020, tmp_path) as owned:
+        assert owned is process
+    assert sleeps == [0.1]
+    assert process.events == ["terminate-funnel", ("wait-funnel", 10)]
+
+
+def test_stabilized_foreign_configuration_still_prevents_launch(monkeypatch, tmp_path):
+    foreign = config(9999)
+    results = iter([{}, foreign, foreign, foreign])
+    monkeypatch.setattr(funnel, "read_client_json", lambda *args: next(results))
+    monkeypatch.setattr(funnel.time, "sleep", lambda _: None)
+    monkeypatch.setattr(funnel.subprocess, "Popen", lambda *a, **k: pytest.fail("Never overwrite foreign state"))
+    with pytest.raises(funnel.LaunchError, match="уже настроен"):
+        with funnel.funnel_process(Path("client.exe"), ORIGIN, 8020, tmp_path):
+            pytest.fail("Foreign state cannot be adopted")
 
 
 def test_existing_serve_or_funnel_prevents_start(monkeypatch, tmp_path):
@@ -309,6 +344,23 @@ def test_real_preflight_failure_never_starts_backend_or_publication(monkeypatch,
     assert not events
 
 
+@pytest.mark.parametrize("mode", ["mock", "real"])
+def test_check_only_validates_without_creating_sample_server_or_publication(monkeypatch, tmp_path, capsys, mode):
+    events, _ = prepare_main(monkeypatch, tmp_path)
+    observed = {}
+
+    def checks(**options):
+        observed.update(options)
+        return [doctor.Check("OK", "synthetic", "ready")]
+
+    monkeypatch.setattr(doctor, "run_checks", checks)
+    assert funnel.main(["--mode", mode, "--check-only"]) == 0
+    assert observed["skip_port"] is False
+    assert observed["mode"] == mode
+    assert events == []
+    assert "анализ видео не запускались" in capsys.readouterr().out
+
+
 def test_backend_startup_failure_never_opens_public_access(monkeypatch, tmp_path):
     events, _ = prepare_main(monkeypatch, tmp_path)
 
@@ -361,3 +413,26 @@ def test_keyboard_interrupt_cleans_owned_resources_and_never_prints_api_key(monk
     assert observed["settings"].mode == "mock"
     assert observed["settings"].data_dir == tmp_path / "backend" / ".local" / "funnel-mock"
     assert SECRET not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("arguments,expected", [
+    (["-Install"], "NEW environment directory"),
+    (["-Install", "-CheckOnly"], "CheckOnly never installs"),
+])
+def test_real_wrapper_never_installs_over_existing_environment(tmp_path, arguments, expected):
+    powershell = shutil.which("powershell")
+    if not powershell:
+        pytest.skip("Windows PowerShell is unavailable")
+    existing = tmp_path / "working-environment"
+    existing.mkdir()
+    marker = existing / "preserve-working-dependencies.txt"
+    marker.write_text("keep", encoding="utf-8")
+    result = subprocess.run([
+        powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(funnel.ROOT / "scripts" / "funnel-real.ps1"),
+        "-VenvPath", str(existing), *arguments,
+    ], cwd=funnel.ROOT, capture_output=True, timeout=30)
+    assert result.returncode != 0
+    assert expected.encode() in result.stdout + result.stderr
+    assert list(existing.iterdir()) == [marker]
+    assert marker.read_text(encoding="utf-8") == "keep"

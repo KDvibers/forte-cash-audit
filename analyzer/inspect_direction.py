@@ -135,7 +135,7 @@ def _verify_images(source, root, frames, times):
 
 
 def inspect_direction(source_report, out, *, base_url="http://127.0.0.1:8082", budget_sec=60.0,
-                      max_windows=4):
+                      max_windows=4, reserve_context=False):
     """Create a new report without changing the source or managing model servers.
 
     Timing covers this pass only, including reconstruction and verification.
@@ -146,6 +146,8 @@ def inspect_direction(source_report, out, *, base_url="http://127.0.0.1:8082", b
         raise ValueError("budget_sec must be finite and positive")
     if type(max_windows) is not int or max_windows < 0:
         raise ValueError("max_windows must be a nonnegative integer")
+    if type(reserve_context) is not bool:
+        raise ValueError("reserve_context must be boolean")
     started = time.perf_counter()
     deadline = started + budget_sec
     source_path = Path(source_report).expanduser().resolve(strict=True)
@@ -160,7 +162,8 @@ def inspect_direction(source_report, out, *, base_url="http://127.0.0.1:8082", b
         "source_report_path": str(source_path), "source_report_sha256": _sha(source_bytes),
         "source_report_snapshot": "source_report.json", "policy_sha256": direction_policy_fingerprint(),
         "settings": {"base_url": base_url, "budget_sec": budget_sec, "max_windows": max_windows,
-                     "sampling": dict(_SAMPLING), "request_timeout_sec": 20.0},
+                     "sampling": dict(_SAMPLING), "request_timeout_sec": 20.0,
+                     "reserve_context": reserve_context},
         "direction_checks": [], "errors": [], "feature_support": dict(DIRECTION_SUPPORT),
         "source_verification": {"status": "pending"},
         "timing_scope": "direction_pass_only_including_reconstruction_and_verification",
@@ -223,7 +226,8 @@ def inspect_direction(source_report, out, *, base_url="http://127.0.0.1:8082", b
         }
         report.update(duration_sec=sampled["duration_sec"], extraction_seconds=sampled["extraction_seconds"],
                       dense_max_sample_gap_sec=sampled["max_sample_gap_sec"])
-        selection = select_direction_windows(frames, source.get("action_checks", []), max_windows=max_windows)
+        selection = select_direction_windows(frames, source.get("action_checks", []), max_windows=max_windows,
+                                             reserve_context=reserve_context)
         report["direction_selection"] = selection
         for window in selection["windows"]:
             evidence = []
@@ -315,9 +319,11 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:8082")
     parser.add_argument("--budget", type=float, default=60.0)
     parser.add_argument("--max-windows", type=int, default=4)
+    parser.add_argument("--reserve-context", action="store_true", help="Reserve before/after anchors; experimental")
     args = parser.parse_args()
     report = inspect_direction(args.source_report, args.out, base_url=args.base_url,
-                               budget_sec=args.budget, max_windows=args.max_windows)
+                               budget_sec=args.budget, max_windows=args.max_windows,
+                               reserve_context=args.reserve_context)
     print(json.dumps({"report": str(args.out / "report.json"), "status": report["status"],
                       "selected": report["selected_window_count"], "processed": report["processed_window_count"],
                       "total_seconds": report["total_seconds"], "errors": report["errors"]}, ensure_ascii=False))

@@ -8,7 +8,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { KEY, VERSION } = require("../recovery.js");
-const { validate } = require("../results.js");
+const { validate, normalizeScope, scopeText, negativeVerdictText } = require("../results.js");
 
 const UPLOAD = "c36eb75d-dbc2-4bd7-9a7e-1fc80477d737";
 const JOB = "cf088334-70f2-41d5-a74d-f953fdf73915";
@@ -114,7 +114,7 @@ function makeHarness({ record = saved(), session = bootstrap(), lookup = metadat
     return localStorage;
   } });
   browser.CashAuditResults = {
-    validate,
+    validate, normalizeScope, scopeText, negativeVerdictText,
     show(data, options) { shown.push({ data, options }); return true; },
     clear() {},
   };
@@ -192,6 +192,9 @@ test("refresh restores processing then done using GET requests only", async () =
   assert.ok(page.requests.every((entry) => entry.method === "GET"));
   assert.equal(page.jobRequests().length, 2);
   assert.equal(page.maxPendingGets(), 1);
+  assert.equal(page.get("elapsed-time").textContent, "Задание восстановлено. Длительность обработки недоступна.");
+  await page.advance(120000);
+  assert.equal(page.get("elapsed-time").textContent, "Задание восстановлено. Длительность обработки недоступна.");
 });
 
 test("stored result remains available while the current analyzer is unavailable", async () => {
@@ -288,6 +291,66 @@ test("original mock result is never relabelled real after a server mode change",
   assert.equal(page.posts.length, 0);
 });
 
+const analysisScope = () => ({
+  rules: [{ id: "cash_after_departure", title: "Деньги после ухода сотрудника" }],
+  notice: "Результат относится к выбранным кадрам.", complete_case_coverage: false,
+});
+
+test("fresh real upload snapshots the advertised scope and narrows the negative verdict", async () => {
+  const currentScope = analysisScope();
+  const page = makeHarness({ record: null, session: bootstrap({ mode: "real", analysis_scope: currentScope }),
+    lookup: metadata({ mode: "real" }) });
+  await page.settle();
+  assert.equal(page.get("analysis-scope-notice").hidden, false);
+  assert.match(page.get("analysis-scope-notice").textContent, /Деньги после ухода сотрудника/);
+  page.get("video-input").files = [{ name: "neutral.mov", size: 12345, lastModified: EPOCH - 1000 }];
+  page.get("video-input").emit("change");
+  currentScope.rules[0].title = "A later service configuration";
+  page.posts[0].respond(200, { job_id: JOB }, { "X-Cash-Audit-Job-Mode": "real" });
+  await page.settle();
+  assert.equal(page.shown.length, 1);
+  assert.deepEqual(page.shown[0].options.analysisScope, analysisScope());
+  assert.equal(page.get("result-title").textContent, negativeVerdictText);
+  assert.match(page.get("upload-status").textContent, /По выполненным проверкам/);
+  assert.doesNotMatch(page.storage.get(KEY), /cash_after_departure/);
+});
+
+test("restored real result never inherits the current service scope", async () => {
+  const page = makeHarness({ record: saved({ mode: "real" }),
+    session: bootstrap({ mode: "real", analysis_scope: analysisScope() }),
+    lookup: metadata({ mode: "real", status: "done" }) });
+  await page.settle();
+  assert.equal(page.shown[0].options.analysisScope, null);
+  assert.equal(page.shown[0].options.mode, "real");
+  assert.match(page.get("analysis-scope-notice").textContent, /Объём выполненных проверок не указан/);
+  assert.doesNotMatch(page.get("analysis-scope-notice").textContent, /Деньги после ухода сотрудника/);
+  assert.equal(page.posts.length, 0);
+});
+
+test("a restored mock or unknown result never displays current real capabilities", async () => {
+  for (const mode of ["mock", null]) {
+    const page = makeHarness({ record: saved({ mode }),
+      session: bootstrap({ mode: "real", analysis_scope: analysisScope() }), lookup: metadata({ mode }) });
+    await page.settle();
+    assert.equal(page.get("analysis-scope-notice").hidden, true);
+    assert.equal(page.get("analysis-scope-notice").textContent, "");
+    if (mode === "mock") {
+      assert.equal(page.shown[0].options.analysisScope, null);
+      assert.equal(page.get("mode-notice").hidden, false);
+    } else assert.equal(page.shown.length, 0);
+  }
+});
+
+test("missing or malformed scope keeps a real service usable without claiming supported rules", async () => {
+  for (const scope of [undefined, { rules: ["made-up"], notice: "anything", complete_case_coverage: false }]) {
+    const page = makeHarness({ record: null, session: bootstrap({ mode: "real", analysis_scope: scope }) });
+    await page.settle();
+    assert.equal(page.get("choose-video").disabled, false);
+    assert.match(page.get("analysis-scope-notice").textContent, /Объём выполненных проверок не указан/);
+    assert.doesNotMatch(page.get("analysis-scope-notice").textContent, /made-up/);
+  }
+});
+
 test("unknown historical mode cannot be inferred from the current real server", async () => {
   const page = makeHarness({ session: bootstrap({ mode: "real" }), lookup: metadata({ mode: null }),
     record: saved({ mode: "real" }) });
@@ -315,8 +378,23 @@ test("explicitly unknown job mode does not reuse a cached known mode", async () 
   assert.equal(page.posts.length, 0);
 });
 
+for (const [serverSeconds, expectedMilliseconds] of [[285, 300000], [60, 75000], [Number.MAX_VALUE, 300000]]) {
+  test(`upload timeout respects the ${serverSeconds}-second server budget and five-minute transport cap`, async () => {
+    const page = makeHarness({ record: null, session: bootstrap({ job_timeout_seconds: serverSeconds }) });
+    await page.settle();
+    const input = page.get("video-input");
+    input.files = [{ name: "neutral.mov", size: 12345, lastModified: EPOCH - 1000 }];
+    input.emit("change");
+    await page.settle();
+    assert.equal(page.posts.length, 1);
+    assert.equal(page.posts[0].timeout, expectedMilliseconds);
+    assert.equal(page.posts[0].method, "POST");
+    assert.equal(page.posts[0].url, "/ui/analyze");
+  });
+}
+
 test("uncertain initial POST is reconciled by GET before any second upload", async () => {
-  const page = makeHarness({ record: null, route(url) {
+  const page = makeHarness({ record: null, session: bootstrap({ mode: "real", job_timeout_seconds: 285 }), route(url) {
     if (url.startsWith("/ui/recovery/")) return response(metadata());
   } });
   await page.settle();
@@ -325,6 +403,7 @@ test("uncertain initial POST is reconciled by GET before any second upload", asy
   input.emit("change");
   await page.settle();
   assert.equal(page.posts.length, 1);
+  assert.equal(page.posts[0].timeout, 300000);
   assert.ok(page.storage.has(KEY), "Recovery metadata must be saved before a POST can be interrupted");
   page.posts[0].emit("timeout");
   await page.settle();
@@ -434,6 +513,37 @@ test("refresh restores a failed check as a technical failure, never as no violat
   assert.equal(page.posts.length, 0);
 });
 
+for (const [code, expected] of [
+  ["timeout", /включая загрузку и очередь/],
+  ["incomplete_analysis", /не хватило надёжных визуальных признаков/],
+  ["real_restart_required", /перезапустить модели и приложение/],
+  ["server_restarted", /автоматически повторно не отправляется/],
+  ["analyzer_contract", /несовместима с сервером/],
+  ["<script>private-error-details</script>", /Сервер сообщил об ошибке обработки/],
+  ["__proto__", /Сервер сообщил об ошибке обработки/],
+]) {
+  test(`real failed result explains safe error ${code} without a new upload or verdict`, async () => {
+    const page = makeHarness({ session: bootstrap({ mode: "real" }), record: saved({ mode: "real" }),
+      lookup: metadata({ status: "failed", mode: "real" }), route(url) {
+        if (url === `/ui/jobs/${JOB}`) return response({ job_id: JOB, status: "failed", error_code: code },
+          200, { "X-Cash-Audit-Job-Mode": "real" });
+      } });
+    await page.settle();
+    assert.match(page.get("result-description").textContent, expected);
+    assert.match(page.get("result-description").textContent, /Заключение по видео не сформировано/);
+    assert.doesNotMatch(page.get("result-description").textContent, /private-error-details/);
+    assert.equal(page.get("result-live").dataset.state, "failed");
+    assert.equal(page.shown.length, 0);
+    assert.equal(page.posts.length, 0);
+    if (code === "incomplete_analysis") {
+      assert.match(page.get("result-title").textContent, /Недостаточно данных/);
+      assert.match(page.get("selection-note").textContent, /не подтверждают отсутствие нарушений/);
+      assert.doesNotMatch(page.get("selection-note").textContent, /перезапустить|восстановления|Техническая ошибка/);
+      assert.doesNotMatch(page.get("result-description").textContent, /перезапустить|модел/);
+    }
+  });
+}
+
 test("starting a new check after an unavailable worker reconnects and enables file selection", async () => {
   let sessions = 0;
   const page = makeHarness({ route(url) {
@@ -478,6 +588,7 @@ test("choosing MOV starts one automatic upload and ignores a second selection wh
   assert.equal(page.shown.length, 1);
   assert.equal(page.shown[0].options.file, file, "The result must retain the file actually submitted");
   assert.equal(page.get("result-live").dataset.state, "done");
+  assert.match(page.get("elapsed-time").textContent, /^С начала загрузки: /);
   assert.equal(page.get("new-video").hidden, false);
 });
 

@@ -185,10 +185,13 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def check_model_health() -> Check:
+def check_model_health(port: int = 8080) -> Check:
+    if isinstance(port, bool) or port not in (8080, 8081):
+        return Check("FAIL", "Сервер модели", "Диагностика допускает только объявленные локальные порты 8080 и 8081.")
+    address = f"http://127.0.0.1:{port}/health"
     try:
         opener = build_opener(ProxyHandler({}), NoRedirect())
-        request = Request("http://127.0.0.1:8080/health", headers={"Accept": "application/json"})
+        request = Request(address, headers={"Accept": "application/json"})
         with opener.open(request, timeout=3) as response:
             raw = response.read(4097)
             if response.status != 200 or len(raw) > 4096:
@@ -197,9 +200,89 @@ def check_model_health() -> Check:
         if not isinstance(payload, dict) or payload.get("status") != "ok":
             raise ValueError("Model is not ready")
     except Exception:
-        return Check("FAIL", "Сервер модели",
-                     "127.0.0.1:8080/health не подтвердил готовность. Модель не запускалась, запрос анализа не выполнялся.")
-    return Check("OK", "Сервер модели", "Локальный health подтвердил готовность. Это не проверка качества анализа.")
+        return Check("FAIL", f"Сервер модели {port}",
+                     f"127.0.0.1:{port}/health не подтвердил готовность. Модель не запускалась, запрос анализа не выполнялся.")
+    return Check("OK", f"Сервер модели {port}", "Локальный health подтвердил готовность. Это не проверка качества анализа.")
+
+
+ANALYZER_PROBE = r'''
+import contextlib
+import importlib
+import inspect
+import io
+import json
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+result = {"status": "import_failed"}
+try:
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        module = importlib.import_module("analyzer.service")
+        function = getattr(module, "analyze_video", None)
+        ready = getattr(module, "check_ready", None)
+        result = {"status": "contract_failed"}
+        if not callable(function) or not callable(ready):
+            raise ValueError()
+        signature = inspect.signature(function)
+        parameter = signature.parameters.get("budget_sec")
+        if parameter is None or parameter.kind not in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            raise ValueError()
+        signature.bind("not-opened.mov", budget_sec=260.0)
+        inspect.signature(ready).bind()
+        result = {"status": "models_failed"}
+        identities = ready()
+        if not isinstance(identities, (list, tuple)) or len(identities) != 2:
+            raise ValueError()
+        result = {"status": "ok"}
+except Exception:
+    pass
+print(json.dumps(result))
+'''
+
+
+def check_analyzer_runtime(root: Path) -> Check:
+    """Import in a short-lived child and call readiness only, never analysis."""
+    try:
+        process = run_hidden([sys.executable, "-I", "-c", ANALYZER_PROBE, str(root.resolve())],
+                             timeout=25, cwd=root)
+        if process.returncode or len(process.stdout) > 4096:
+            raise ValueError
+        payload = json.loads(process.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError
+        state = payload.get("status")
+    except Exception:
+        state = "probe_failed"
+    messages = {
+        "ok": "analyze_video принимает budget_sec; проверка идентичности моделей check_ready завершилась успешно. Видео не отправлялось; качество не проверено.",
+        "contract_failed": "Нужны analyze_video(video_path, budget_sec=...) и check_ready(). Старая функция с одним аргументом несовместима; подключите актуальную интеграцию Данияра без перезаписи его локальных изменений.",
+        "models_failed": "check_ready() не подтвердил обе объявленные локальные модели на 8080 и 8081. Проверьте 2B/4B, порты и идентичность весов; модели не запускались.",
+        "import_failed": "Не удалось импортировать analyzer.service. Проверьте актуальные файлы анализатора и зависимости в выбранном окружении; подробности скрыты.",
+        "probe_failed": "Проверка интерфейса анализатора не завершилась штатно за отведённое время. Вывод модуля скрыт; анализ видео не запускался.",
+    }
+    return Check("OK" if state == "ok" else "FAIL", "Интерфейс и модели анализатора",
+                 messages.get(state, messages["probe_failed"]))
+
+
+def check_analyzer_dependencies(root: Path) -> list[Check]:
+    """Verify analyzer imports in the same interpreter as the API worker."""
+    try:
+        pins = pinned_versions(root / "analyzer" / "requirements.txt")
+        if set(pins) != {"av", "pillow"}:
+            raise ValueError
+        process = run_hidden([sys.executable, "-I", "-c", DEPENDENCY_PROBE,
+                              json.dumps({"av": "av", "pillow": "PIL"})], timeout=15, cwd=root)
+        if process.returncode or len(process.stdout) > 4096:
+            raise ValueError
+        result = json.loads(process.stdout)
+        if not isinstance(result, dict):
+            raise ValueError
+    except Exception:
+        return [Check("FAIL", "Зависимости анализатора", "Не удалось проверить PyAV и Pillow выбранного окружения; вывод зависимостей скрыт.")]
+    return [Check("OK" if isinstance(result.get(name), dict) and result[name].get("ok") is True
+                  and result[name].get("version") == version else "FAIL", name + " (анализатор)",
+                  "Импорт и версия должны соответствовать analyzer/requirements.txt; окружение не изменялось.")
+            for name, version in pins.items()]
 
 
 def check_analyzer(root: Path, mode: str) -> list[Check]:
@@ -219,7 +302,9 @@ def check_analyzer(root: Path, mode: str) -> list[Check]:
     else:
         checks.append(Check("OK", "Совместимость Pillow", "В обоих списках закреплена одинаковая версия Pillow."))
     if mode == "real":
-        checks.append(check_model_health())
+        checks.extend(check_analyzer_dependencies(root))
+        checks.extend(check_model_health(port) for port in (8080, 8081))
+        checks.append(check_analyzer_runtime(root))
     return checks
 
 

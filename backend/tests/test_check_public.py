@@ -68,6 +68,14 @@ def test_normalizes_https_default_port():
     assert check_public.https_origin("https://PUBLIC.example:443/") == ORIGIN
 
 
+def test_neutral_public_check_refuses_real_before_network_or_video(monkeypatch):
+    api = StubOpener()
+    monkeypatch.setattr(check_public, "create_sample", lambda *args: pytest.fail("No synthetic real input"))
+    with pytest.raises(check_public.CheckError, match="check-real"):
+        check_public.run_check(ORIGIN, "real", KEY, api, StubOpener())
+    assert api.requests == []
+
+
 @pytest.mark.parametrize("health", [
     {"mode": "real", "analyzer_ready": True, "status": "ok"},
     {"mode": "mock", "analyzer_ready": False, "status": "degraded"},
